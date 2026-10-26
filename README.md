@@ -1,4 +1,6 @@
-app.py
+pandas
+streamlit
+
 
 import pandas as pd
 
