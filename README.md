@@ -1,7 +1,5 @@
 pandas
 streamlit
-
-
 import pandas as pd
 
 saisons = ["2122", "2223", "2324", "2425"]
