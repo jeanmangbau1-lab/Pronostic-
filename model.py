@@ -41,6 +41,28 @@ KS = np.arange(10)
 FACT = np.array([factorial(k) for k in range(10)], dtype=float)
 MASQUE_OVER = (KS[:, None] + KS[None, :]) > 2
 COLS_REC = ["Date", "HomeTeam", "AwayTeam", "lh", "la", "hg", "ag"]
+COLS_CAL = ["code", "Date", "Time", "HomeTeam", "AwayTeam"]
+
+
+# ---------- TABLEAUX VIDES AVEC LES BONS TYPES ----------
+def rec_vide():
+    return pd.DataFrame({
+        "Date": pd.Series(dtype="datetime64[ns]"),
+        "HomeTeam": pd.Series(dtype=object),
+        "AwayTeam": pd.Series(dtype=object),
+        "lh": pd.Series(dtype=float),
+        "la": pd.Series(dtype=float),
+        "hg": pd.Series(dtype=float),
+        "ag": pd.Series(dtype=float)})
+
+
+def cal_vide():
+    return pd.DataFrame({
+        "code": pd.Series(dtype=object),
+        "Date": pd.Series(dtype="datetime64[ns]"),
+        "Time": pd.Series(dtype=object),
+        "HomeTeam": pd.Series(dtype=object),
+        "AwayTeam": pd.Series(dtype=object)})
 
 
 # ---------- DONNEES ----------
@@ -89,13 +111,12 @@ def charger(code):
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def calendrier():
-    colonnes = ["code", "Date", "Time", "HomeTeam", "AwayTeam"]
     morceaux = []
     try:
         f = pd.read_csv("https://www.football-data.co.uk/fixtures.csv",
                         encoding="latin-1", on_bad_lines="skip")
         f["code"] = f["Div"]
-        morceaux.append(f.reindex(columns=colonnes))
+        morceaux.append(f.reindex(columns=COLS_CAL))
     except Exception:
         pass
     try:
@@ -104,16 +125,21 @@ def calendrier():
         n = n.rename(columns={"Home": "HomeTeam", "Away": "AwayTeam"})
         inverse = {v: k for k, v in PAYS_NEW.items()}
         n["code"] = n["Country"].astype(str).str.strip().str.lower().map(inverse)
-        morceaux.append(n.reindex(columns=colonnes))
+        morceaux.append(n.reindex(columns=COLS_CAL))
     except Exception:
         pass
     if not morceaux:
-        return pd.DataFrame(columns=colonnes)
-    c = pd.concat(morceaux, ignore_index=True)
-    c["Date"] = lire_dates(c["Date"])
-    c = c.dropna(subset=["code", "Date", "HomeTeam", "AwayTeam"])
-    c = c[c["code"].isin(TOUS_CODES)]
-    return c.sort_values(["Date", "Time"]).reset_index(drop=True)
+        return cal_vide()
+    try:
+        c = pd.concat(morceaux, ignore_index=True)
+        c["Date"] = lire_dates(c["Date"])
+        c = c.dropna(subset=["code", "Date", "HomeTeam", "AwayTeam"])
+        c = c[c["code"].isin(TOUS_CODES)]
+        if c.empty:
+            return cal_vide()
+        return c.sort_values(["Date", "Time"]).reset_index(drop=True)
+    except Exception:
+        return cal_vide()
 
 
 # ---------- MODELE DE POISSON ----------
@@ -211,7 +237,7 @@ def backtest(d, n_max=300):
     n = len(d)
     k = min(n_max, int(n * 0.25))
     if k < 30:
-        return pd.DataFrame(columns=COLS_REC)
+        return rec_vide()
     train, test = d.iloc[: n - k], d.iloc[n - k:]
     att, dfn, mh, ma = forces(train)
     lignes = []
@@ -219,23 +245,30 @@ def backtest(d, n_max=300):
         if r.HomeTeam in att and r.AwayTeam in att:
             lh, la = lambdas_brutes(r.HomeTeam, r.AwayTeam, att, dfn, mh, ma)
             lignes.append((r.Date, r.HomeTeam, r.AwayTeam, lh, la, r.FTHG, r.FTAG))
+    if not lignes:
+        return rec_vide()
     return pd.DataFrame(lignes, columns=COLS_REC)
 
 
 def resultats_journal(code, d):
     """Pronostics enregistrés dont le match a maintenant été joué."""
     if not os.path.exists(LOG):
-        return pd.DataFrame(columns=COLS_REC)
+        return rec_vide()
     try:
         j = pd.read_csv(LOG)
         j = j[j["code"] == code].copy()
-        j["Date"] = pd.to_datetime(j["Date"], errors="coerce")
-        res = d[["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]]
+        if j.empty:
+            return rec_vide()
+        j["Date"] = pd.to_datetime(j["Date"], errors="coerce").astype("datetime64[ns]")
+        res = d[["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]].copy()
+        res["Date"] = res["Date"].astype("datetime64[ns]")
         m = j.merge(res, on=["Date", "HomeTeam", "AwayTeam"], how="inner")
+        if m.empty:
+            return rec_vide()
         m = m.rename(columns={"FTHG": "hg", "FTAG": "ag"})
         return m[COLS_REC]
     except Exception:
-        return pd.DataFrame(columns=COLS_REC)
+        return rec_vide()
 
 
 def corrections(rec):
@@ -352,21 +385,32 @@ att, dfn, mh, ma = forces(donnees)
 # Apprentissage : erreurs du backtest + pronostics réels déjà joués
 rec_log = resultats_journal(code, donnees)
 rec_bt = backtest(donnees)
-rec = pd.concat([rec_log, rec_bt], ignore_index=True)
-rec = rec.drop_duplicates(subset=["Date", "HomeTeam", "AwayTeam"], keep="first")
+morceaux_rec = [x for x in (rec_log, rec_bt) if not x.empty]
+if morceaux_rec:
+    rec = pd.concat(morceaux_rec, ignore_index=True)
+    rec = rec.drop_duplicates(subset=["Date", "HomeTeam", "AwayTeam"], keep="first")
+else:
+    rec = rec_vide()
 corr = corrections(rec)
 
+calendrier_charge = not cal.empty
+cal = cal.copy()
+cal["Date"] = pd.to_datetime(cal["Date"], errors="coerce")
+cal = cal.dropna(subset=["Date"])
 cal = cal[(cal["code"] == code)
           & (cal["Date"] >= pd.Timestamp(lundi))
           & (cal["Date"] <= pd.Timestamp(dimanche))]
-if choix != "Toute la semaine":
+if choix != "Toute la semaine" and not cal.empty:
     cal = cal[cal["Date"].dt.weekday == JOURS.index(choix)]
 
 onglet1, onglet2 = st.tabs(["Pronostics", "Apprentissage"])
 
 with onglet1:
     st.subheader("Programme des matchs")
-    if cal.empty:
+    if not calendrier_charge:
+        st.warning("Le calendrier des matchs n'a pas pu être chargé. "
+                   "Réessaie dans quelques minutes.")
+    elif cal.empty:
         st.info("Aucun match programmé pour cette période.")
     else:
         total = 0
@@ -429,7 +473,7 @@ with onglet2:
             lignes.append({"Match": f"{r.HomeTeam} - {r.AwayTeam}",
                            "Prédit": lab[int(p.argmax())],
                            "Confiance": f"{p.max() * 100:.0f}%",
-                           "Score réel": f"{r.hg}-{r.ag}",
+                           "Score réel": f"{int(r.hg)}-{int(r.ag)}",
                            "Réel": reel})
         st.write("Derniers matchs vérifiés :")
         st.dataframe(pd.DataFrame(lignes), hide_index=True)
