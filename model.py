@@ -2,21 +2,38 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from math import exp, factorial
+from datetime import date, timedelta
 
 st.set_page_config(page_title="Pronostics Football", layout="centered")
 
-CHAMPIONNATS = {
-    "Angleterre": "E0", "Écosse": "SC0", "Allemagne": "D1",
-    "Italie": "I1", "Espagne": "SP1", "France": "F1",
-    "Pays-Bas": "N1", "Belgique": "B1", "Portugal": "P1",
-    "Turquie": "T1", "Grèce": "G1", "Argentine": "ARG",
-    "Autriche": "AUT", "Brésil": "BRA", "Chine": "CHN",
-    "Danemark": "DNK", "Finlande": "FIN", "Irlande": "IRL",
-    "Japon": "JPN", "Mexique": "MEX", "Norvège": "NOR",
-    "Pologne": "POL", "Roumanie": "ROU", "Russie": "RUS",
-    "Suède": "SWE", "Suisse": "SWZ", "États-Unis": "USA",
+D1, D2, D3 = "1re division", "2e division", "3e division"
+PAYS = {
+    "Angleterre": {D1: "E0", D2: "E1", D3: "E2"},
+    "Écosse": {D1: "SC0", D2: "SC1", D3: "SC2"},
+    "Allemagne": {D1: "D1", D2: "D2"},
+    "Italie": {D1: "I1", D2: "I2"},
+    "Espagne": {D1: "SP1", D2: "SP2"},
+    "France": {D1: "F1", D2: "F2"},
+    "Pays-Bas": {D1: "N1"}, "Belgique": {D1: "B1"},
+    "Portugal": {D1: "P1"}, "Turquie": {D1: "T1"}, "Grèce": {D1: "G1"},
+    "Argentine": {D1: "ARG"}, "Autriche": {D1: "AUT"},
+    "Brésil": {D1: "BRA"}, "Chine": {D1: "CHN"},
+    "Danemark": {D1: "DNK"}, "Finlande": {D1: "FIN"},
+    "Irlande": {D1: "IRL"}, "Japon": {D1: "JPN"},
+    "Mexique": {D1: "MEX"}, "Norvège": {D1: "NOR"},
+    "Pologne": {D1: "POL"}, "Roumanie": {D1: "ROU"},
+    "Russie": {D1: "RUS"}, "Suède": {D1: "SWE"},
+    "Suisse": {D1: "SWZ"}, "États-Unis": {D1: "USA"},
 }
+TOUS_CODES = {c for divs in PAYS.values() for c in divs.values()}
 SAISONS = ["2223", "2324", "2425", "2526", "2627"]
+JOURS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+PAYS_NEW = {
+    "ARG": "argentina", "AUT": "austria", "BRA": "brazil", "CHN": "china",
+    "DNK": "denmark", "FIN": "finland", "IRL": "ireland", "JPN": "japan",
+    "MEX": "mexico", "NOR": "norway", "POL": "poland", "ROU": "romania",
+    "RUS": "russia", "SWE": "sweden", "SWZ": "switzerland", "USA": "usa",
+}
 
 
 # ---------- DONNEES ----------
@@ -51,13 +68,30 @@ def charger(code):
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def charger_prochains(code):
+def calendrier():
+    colonnes = ["code", "Date", "Time", "HomeTeam", "AwayTeam"]
+    morceaux = []
     try:
         f = pd.read_csv("https://www.football-data.co.uk/fixtures.csv")
-        f = f[f["Div"] == code][["Date", "HomeTeam", "AwayTeam"]].dropna()
-        return f.head(10).reset_index(drop=True)
+        f["code"] = f["Div"]
+        morceaux.append(f.reindex(columns=colonnes))
     except Exception:
-        return pd.DataFrame()
+        pass
+    try:
+        n = pd.read_csv("https://www.football-data.co.uk/new_league_fixtures.csv")
+        n = n.rename(columns={"Home": "HomeTeam", "Away": "AwayTeam"})
+        inverse = {v: k for k, v in PAYS_NEW.items()}
+        n["code"] = n["Country"].astype(str).str.strip().str.lower().map(inverse)
+        morceaux.append(n.reindex(columns=colonnes))
+    except Exception:
+        pass
+    if not morceaux:
+        return pd.DataFrame(columns=colonnes)
+    c = pd.concat(morceaux, ignore_index=True)
+    c["Date"] = pd.to_datetime(c["Date"], dayfirst=True, errors="coerce")
+    c = c.dropna(subset=["code", "Date", "HomeTeam", "AwayTeam"])
+    c = c[c["code"].isin(TOUS_CODES)]
+    return c.sort_values(["Date", "Time"]).reset_index(drop=True)
 
 
 # ---------- MODELE DE POISSON ----------
@@ -127,11 +161,20 @@ def carte(dom, ext, att, dfn, mh, ma):
 # ---------- INTERFACE ----------
 st.title("⚽ Pronostics Football")
 
-nom = st.selectbox("Championnat", list(CHAMPIONNATS.keys()))
-code = CHAMPIONNATS[nom]
+pays = st.selectbox("Pays", list(PAYS.keys()))
+divisions = PAYS[pays]
+div_nom = st.selectbox("Division", list(divisions.keys()))
+code = divisions[div_nom]
 
-with st.spinner("Chargement des données..."):
+ref = st.date_input("Choisis une date de la semaine", value=date.today())
+lundi = ref - timedelta(days=ref.weekday())
+dimanche = lundi + timedelta(days=6)
+st.caption(f"Semaine du {lundi:%d/%m/%Y} au {dimanche:%d/%m/%Y}")
+choix = st.selectbox("Jour", ["Toute la semaine"] + JOURS)
+
+with st.spinner("Chargement..."):
     donnees = charger(code)
+    cal = calendrier()
 
 if donnees.empty:
     st.error("Impossible de charger les données de ce championnat.")
@@ -139,24 +182,11 @@ if donnees.empty:
 
 att, dfn, mh, ma = forces(donnees)
 
-st.subheader("Prochains matchs")
-prochains = charger_prochains(code)
-affiches = 0
-if not prochains.empty:
-    for _, m in prochains.iterrows():
-        if m["HomeTeam"] in att and m["AwayTeam"] in att:
-            st.caption(str(m["Date"]))
-            carte(m["HomeTeam"], m["AwayTeam"], att, dfn, mh, ma)
-            affiches += 1
-if affiches == 0:
-    st.info("Pas de matchs à venir pour ce championnat. Utilise la saisie manuelle.")
+cal = cal[(cal["code"] == code)
+          & (cal["Date"] >= pd.Timestamp(lundi))
+          & (cal["Date"] <= pd.Timestamp(dimanche))]
+if choix != "Toute la semaine":
+    cal = cal[cal["Date"].dt.weekday == JOURS.index(choix)]
 
-st.subheader("Saisie manuelle")
-equipes = sorted(att.keys())
-dom = st.selectbox("Équipe à domicile", equipes, key="dom")
-ext = st.selectbox("Équipe à l'extérieur", equipes, index=min(1, len(equipes) - 1), key="ext")
-if st.button("Calculer"):
-    if dom == ext:
-        st.warning("Choisis deux équipes différentes.")
-    else:
-        carte(dom, ext, att, dfn, mh, ma)
+st.subheader("Programme des matchs")
+total
