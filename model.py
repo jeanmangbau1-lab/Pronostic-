@@ -1,75 +1,22 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import difflib
-import re
-import unicodedata
 from math import exp, factorial
-from PIL import Image
 
 st.set_page_config(page_title="Pronostics Football", layout="centered")
 
 CHAMPIONNATS = {
-    "Angleterre": "E0",
-    "Écosse": "SC0",
-    "Allemagne": "D1",
-    "Italie": "I1",
-    "Espagne": "SP1",
-    "France": "F1",
-    "Pays-Bas": "N1",
-    "Belgique": "B1",
-    "Portugal": "P1",
-    "Turquie": "T1",
-    "Grèce": "G1",
-    "Argentine": "ARG",
-    "Autriche": "AUT",
-    "Brésil": "BRA",
-    "Chine": "CHN",
-    "Danemark": "DNK",
-    "Finlande": "FIN",
-    "Irlande": "IRL",
-    "Japon": "JPN",
-    "Mexique": "MEX",
-    "Norvège": "NOR",
-    "Pologne": "POL",
-    "Roumanie": "ROU",
-    "Russie": "RUS",
-    "Suède": "SWE",
-    "Suisse": "SWZ",
-    "États-Unis": "USA",
+    "Angleterre": "E0", "Écosse": "SC0", "Allemagne": "D1",
+    "Italie": "I1", "Espagne": "SP1", "France": "F1",
+    "Pays-Bas": "N1", "Belgique": "B1", "Portugal": "P1",
+    "Turquie": "T1", "Grèce": "G1", "Argentine": "ARG",
+    "Autriche": "AUT", "Brésil": "BRA", "Chine": "CHN",
+    "Danemark": "DNK", "Finlande": "FIN", "Irlande": "IRL",
+    "Japon": "JPN", "Mexique": "MEX", "Norvège": "NOR",
+    "Pologne": "POL", "Roumanie": "ROU", "Russie": "RUS",
+    "Suède": "SWE", "Suisse": "SWZ", "États-Unis": "USA",
 }
 SAISONS = ["2223", "2324", "2425", "2526", "2627"]
-
-ALIAS = {
-    "manchester city": "Man City", "man city": "Man City",
-    "manchester united": "Man United", "man utd": "Man United",
-    "man united": "Man United",
-    "nottingham forest": "Nott'm Forest", "nottingham": "Nott'm Forest",
-    "tottenham hotspur": "Tottenham", "spurs": "Tottenham",
-    "newcastle united": "Newcastle",
-    "wolverhampton": "Wolves", "wolverhampton wanderers": "Wolves",
-    "brighton and hove albion": "Brighton",
-    "brighton & hove albion": "Brighton",
-    "west ham united": "West Ham",
-    "leeds united": "Leeds", "leicester city": "Leicester",
-    "paris saint-germain": "Paris SG", "paris saint germain": "Paris SG",
-    "psg": "Paris SG", "paris": "Paris SG",
-    "olympique de marseille": "Marseille",
-    "olympique lyonnais": "Lyon",
-    "saint-etienne": "St Etienne", "saint etienne": "St Etienne",
-    "sporting": "Sp Lisbon", "sporting cp": "Sp Lisbon",
-    "sporting lisbonne": "Sp Lisbon", "sporting lisbon": "Sp Lisbon",
-    "sporting braga": "Sp Braga", "braga": "Sp Braga",
-    "fc porto": "Porto", "sl benfica": "Benfica",
-    "vitoria guimaraes": "Guimaraes",
-}
-
-
-def norm(t):
-    t = unicodedata.normalize("NFD", str(t))
-    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
-    return t.lower()
 
 
 # ---------- DONNEES ----------
@@ -90,9 +37,8 @@ def charger(code):
     morceaux = []
     for s in SAISONS:
         try:
-            morceaux.append(
-                pd.read_csv(f"https://www.football-data.co.uk/mmz4281/{s}/{code}.csv")
-            )
+            morceaux.append(pd.read_csv(
+                f"https://www.football-data.co.uk/mmz4281/{s}/{code}.csv"))
         except Exception:
             pass
     if not morceaux:
@@ -102,6 +48,16 @@ def charger(code):
     d["FTHG"] = d["FTHG"].astype(int)
     d["FTAG"] = d["FTAG"].astype(int)
     return d.reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def charger_prochains(code):
+    try:
+        f = pd.read_csv("https://www.football-data.co.uk/fixtures.csv")
+        f = f[f["Div"] == code][["Date", "HomeTeam", "AwayTeam"]].dropna()
+        return f.head(10).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
 
 
 # ---------- MODELE DE POISSON ----------
@@ -128,47 +84,33 @@ def forces(d):
     return att, dfn, mh, ma
 
 
-def predire(dom, ext, att, dfn, mh, ma):
+def calcul(dom, ext, att, dfn, mh, ma):
     lh = att[dom] * dfn[ext] * mh
     la = att[ext] * dfn[dom] * ma
-    p1 = pn = p2 = 0.0
-    meilleur, pmax = (0, 0), 0
-    for i in range(8):
-        for j in range(8):
+    p1 = pn = p2 = over = btts = 0.0
+    scores = []
+    for i in range(10):
+        for j in range(10):
             p = poisson(i, lh) * poisson(j, la)
+            scores.append((p, i, j))
             if i > j:
                 p1 += p
             elif i == j:
                 pn += p
             else:
                 p2 += p
-            if p > pmax:
-                pmax, meilleur = p, (i, j)
-    t = p1 + pn + p2
-    return p1 / t, pn / t, p2 / t, meilleur
-
-
-def marches(dom, ext, att, dfn, mh, ma):
-    lh = att[dom] * dfn[ext] * mh
-    la = att[ext] * dfn[dom] * ma
-    scores, over, btts = [], 0.0, 0.0
-    for i in range(10):
-        for j in range(10):
-            p = poisson(i, lh) * poisson(j, la)
-            scores.append((p, i, j))
             if i + j > 2:
                 over += p
             if i > 0 and j > 0:
                 btts += p
-    t = sum(s[0] for s in scores)
+    t = p1 + pn + p2
     scores.sort(reverse=True)
     top3 = [(i, j, p / t) for p, i, j in scores[:3]]
-    return over / t, btts / t, top3
+    return p1 / t, pn / t, p2 / t, over / t, btts / t, top3
 
 
-def carte(dom, ext, res):
-    p1, pn, p2, sc = res
-    over, btts, top3 = marches(dom, ext, att, dfn, mh, ma)
+def carte(dom, ext, att, dfn, mh, ma):
+    p1, pn, p2, over, btts, top3 = calcul(dom, ext, att, dfn, mh, ma)
     st.markdown(f"**{dom} vs {ext}**")
     c1, c2, c3 = st.columns(3)
     c1.metric("1", f"{p1 * 100:.0f}%")
@@ -177,8 +119,44 @@ def carte(dom, ext, res):
     d1, d2 = st.columns(2)
     d1.metric("+2,5 buts", f"{over * 100:.0f}%")
     d2.metric("Les 2 marquent", f"{btts * 100:.0f}%")
-    st.caption(
-        "Scores probables : "
-        + " | ".join(f"{i}-{j} ({p * 100:.0f}%)" for i, j, p in top3)
-    )
+    st.caption("Scores probables : " + " | ".join(
+        f"{i}-{j} ({p * 100:.0f}%)" for i, j, p in top3))
     st.divider()
+
+
+# ---------- INTERFACE ----------
+st.title("⚽ Pronostics Football")
+
+nom = st.selectbox("Championnat", list(CHAMPIONNATS.keys()))
+code = CHAMPIONNATS[nom]
+
+with st.spinner("Chargement des données..."):
+    donnees = charger(code)
+
+if donnees.empty:
+    st.error("Impossible de charger les données de ce championnat.")
+    st.stop()
+
+att, dfn, mh, ma = forces(donnees)
+
+st.subheader("Prochains matchs")
+prochains = charger_prochains(code)
+affiches = 0
+if not prochains.empty:
+    for _, m in prochains.iterrows():
+        if m["HomeTeam"] in att and m["AwayTeam"] in att:
+            st.caption(str(m["Date"]))
+            carte(m["HomeTeam"], m["AwayTeam"], att, dfn, mh, ma)
+            affiches += 1
+if affiches == 0:
+    st.info("Pas de matchs à venir pour ce championnat. Utilise la saisie manuelle.")
+
+st.subheader("Saisie manuelle")
+equipes = sorted(att.keys())
+dom = st.selectbox("Équipe à domicile", equipes, key="dom")
+ext = st.selectbox("Équipe à l'extérieur", equipes, index=min(1, len(equipes) - 1), key="ext")
+if st.button("Calculer"):
+    if dom == ext:
+        st.warning("Choisis deux équipes différentes.")
+    else:
+        carte(dom, ext, att, dfn, mh, ma)
