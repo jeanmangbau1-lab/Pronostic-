@@ -6,6 +6,8 @@ import pandas as pd
 import numpy as np
 from math import factorial
 from datetime import date, timedelta
+import cv2
+import webbrowser
 
 st.set_page_config(page_title="Pronostics Football", layout="centered")
 
@@ -313,21 +315,48 @@ def carte(dom, ext, prev):
         f"{i}-{j} ({p * 100:.0f}%)" for i, j, p in prev["top3"]))
     st.divider()
 
+def lire_qr_code(image_bytes):
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return None, "Impossible de décoder l'image."
+        detector = cv2.QRCodeDetector()
+        data, points, _ = detector.detectAndDecode(img)
+        if data:
+            return data, None
+        else:
+            return None, "Aucun QR code détecté sur l'image."
+    except Exception as e:
+        return None, f"Erreur lors de la lecture : {e}"
+
 def saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code):
     if "matchs_manuels" not in st.session_state:
         st.session_state["matchs_manuels"] = []
 
-    with st.expander("📸 Saisie manuelle, par Photo ou par Fichier", expanded=True):
+    with st.expander("📸 Saisie manuelle, Scan QR Code Elephant Bet & Photo", expanded=True):
         
-        # Option de prise de photo ou d'import de fichier
-        st.markdown("### Importer un bulletin ou une photo de match")
-        photo_prise = st.camera_input("Prendre en photo un bulletin de paris")
-        fichier_charge = st.file_uploader("Ou importer un fichier (PDF, Image, WhatsApp...)", type=["jpg", "jpeg", "png", "pdf"])
+        st.markdown("### Scanner un ticket / Fiche Elephant Bet ou importer une image")
+        photo_prise = st.camera_input("Prendre en photo un bulletin ou QR code")
+        fichier_charge = st.file_uploader("Ou importer un fichier (Image, PDF...)", type=["jpg", "jpeg", "png", "pdf"])
         
-        if photo_prise is not None:
-            st.success("Photo enregistrée avec succès ! (Analyse visuelle prête)")
-        if fichier_charge is not None:
-            st.success(f"Fichier '{fichier_charge.name}' chargé avec succès !")
+        image_a_analyser = photo_prise if photo_prise else fichier_charge
+        
+        if image_a_analyser is not None:
+            bytes_data = image_a_analyser.getvalue()
+            data_qr, erreur_qr = lire_qr_code(bytes_data)
+            
+            if data_qr:
+                st.success("🔍 **QR Code détecté avec succès !**")
+                st.code(data_qr, language="text")
+                if data_qr.startswith("http"):
+                    st.info("Ce QR code contient un lien vers Elephant Bet.")
+                    if st.button("🌐 Ouvrir la vérification sur Elephant Bet"):
+                        webbrowser.open(data_qr)
+                else:
+                    st.info("Code de réservation ou identifiant détecté.")
+            else:
+                st.warning(f"⚠️ {erreur_qr} (L'analyse manuelle reste disponible ci-dessous).")
 
         st.markdown("---")
         options = list(COMPETITIONS_INTER)
