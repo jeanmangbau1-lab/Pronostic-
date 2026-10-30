@@ -268,17 +268,88 @@ def carte(titre, ext, prev):
 SEP = re.compile(r"\s+(?:-|–|—|vs\.?|v|contre|x)\s+", re.I)
 
 
-def extraire_texte(octets, nom):
+def verifier_ocr():
+    """Renvoie (ok, message). Vérifie module pytesseract ET binaire tesseract."""
     try:
-        if nom.lower().endswith(".pdf"):
+        import pytesseract
+    except ImportError:
+        return False, "module python 'pytesseract' non installé"
+    try:
+        v = pytesseract.get_tesseract_version()
+        return True, f"Tesseract {v}"
+    except Exception as e:
+        return False, f"binaire 'tesseract' introuvable ({e})"
+
+
+def pretraiter_image(im):
+    """Rotation EXIF, niveaux de gris, agrandissement, contraste."""
+    from PIL import ImageOps
+    im = ImageOps.exif_transpose(im)
+    im = im.convert("L")
+    w, h = im.size
+    if max(w, h) < 1600:
+        f = 1600 / max(w, h)
+        im = im.resize((int(w * f), int(h * f)), Image.LANCZOS)
+    return ImageOps.autocontrast(im)
+
+
+def ocr_image(im):
+    """OCR tolérant : essaie fra, fallback sans langue, renvoie '' en cas d'échec."""
+    try:
+        import pytesseract
+    except ImportError:
+        return ""
+    im = pretraiter_image(im)
+    try:
+        return pytesseract.image_to_string(im, lang="fra")
+    except Exception:
+        try:
+            return pytesseract.image_to_string(im)
+        except Exception:
+            return ""
+
+
+def extraire_texte(octets, nom):
+    """Retourne (texte, erreur). erreur=None si tout va bien."""
+    nom = (nom or "").lower()
+
+    if nom.endswith(".pdf"):
+        erreurs = []
+
+        # 1) PDF texte natif
+        try:
             import pdfplumber
             with pdfplumber.open(io.BytesIO(octets)) as pdf:
-                return "\n".join((p.extract_text() or "") for p in pdf.pages)
-        import pytesseract
+                txt = "\n".join((p.extract_text() or "") for p in pdf.pages)
+            if txt.strip():
+                return txt, None
+        except Exception as e:
+            erreurs.append(f"pdfplumber: {e}")
+
+        # 2) PDF scanné → OCR page par page (pypdfium2, sans poppler)
+        try:
+            import pypdfium2 as pdfium
+            doc = pdfium.PdfDocument(octets)
+            parties = [ocr_image(page.render(scale=2).to_pil()) for page in doc]
+            txt = "\n".join(parties)
+            if txt.strip():
+                return txt, None
+            erreurs.append("OCR PDF vide (scan trop flou ?)")
+        except Exception as e:
+            erreurs.append(f"OCR PDF: {e}")
+
+        return "", " | ".join(erreurs) or "PDF illisible"
+
+    # image (photo caméra, jpg, png…)
+    try:
         from PIL import Image
-        return pytesseract.image_to_string(Image.open(io.BytesIO(octets)))
-    except Exception:
-        return ""
+        im = Image.open(io.BytesIO(octets))
+        txt = ocr_image(im)
+        if txt.strip():
+            return txt, None
+        return "", "Aucun texte détecté dans l'image (cadrage ? contraste ?)"
+    except Exception as e:
+        return "", f"OCR image: {e}"
 
 
 def extraire_matchs(texte):
@@ -380,6 +451,14 @@ def zone_programme(att, dfn, mh, ma, corr):
             "Tu peux aussi écrire ou coller les matchs, un par ligne : "
             "Équipe A - Équipe B")
 
+    ok_ocr, msg_ocr = verifier_ocr()
+    if not ok_ocr:
+        st.error(f"⚠️ OCR indisponible sur le serveur : {msg_ocr}. "
+                 "Installe 'tesseract-ocr' + 'tesseract-ocr-fra' "
+                 "(voir packages.txt). La saisie manuelle reste utilisable.")
+    else:
+        st.caption(f"OCR prêt : {msg_ocr}")
+
     photo = st.camera_input("📷 Photographier le programme", key="prog_photo")
     fichier = st.file_uploader("📁 Importer une photo ou un PDF",
                                type=["jpg", "jpeg", "png", "pdf"], key="prog_file")
@@ -388,10 +467,13 @@ def zone_programme(att, dfn, mh, ma, corr):
     texte = ""
     if source is not None:
         octets = source.getvalue()
-        texte = extraire_texte(octets, getattr(source, "name", "photo.jpg"))
+        with st.spinner("Lecture du document..."):
+            texte, erreur = extraire_texte(octets, getattr(source, "name", "photo.jpg"))
+        if erreur:
+            st.warning(f"Lecture automatique : {erreur}")
         if not texte.strip():
-            st.warning("Lecture automatique impossible. "
-                       "Écris ou colle les matchs dans la case ci-dessous.")
+            st.info("Écris ou colle les matchs dans la case ci-dessous.")
+
         qr, _ = lire_qr_code(octets)
         if qr:
             st.caption(f"QR code détecté : {qr}")
