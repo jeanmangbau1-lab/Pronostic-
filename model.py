@@ -1,13 +1,16 @@
 import io
 import os
-import requests
+import re
+import difflib
 import streamlit as st
 import pandas as pd
 import numpy as np
 from math import factorial
-from datetime import date, timedelta
-import cv2
-import webbrowser
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 st.set_page_config(page_title="Pronostics Football", layout="centered")
 
@@ -30,15 +33,7 @@ PAYS = {
     "Russie": {D1: "RUS"}, "Suède": {D1: "SWE"},
     "Suisse": {D1: "SWZ"}, "États-Unis": {D1: "USA"},
 }
-TOUS_CODES = {c for divs in PAYS.values() for c in divs.values()}
 SAISONS = ["2223", "2324", "2425", "2526", "2627"]
-JOURS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-PAYS_NEW = {
-    "ARG": "argentina", "AUT": "austria", "BRA": "brazil", "CHN": "china",
-    "DNK": "denmark", "FIN": "finland", "IRL": "ireland", "JPN": "japan",
-    "MEX": "mexico", "NOR": "norway", "POL": "poland", "ROU": "romania",
-    "RUS": "russia", "SWE": "sweden", "SWZ": "switzerland", "USA": "usa",
-}
 
 COMPETITIONS_INTER = [
     "Coupe d'Afrique des Nations (CAN)",
@@ -55,17 +50,13 @@ COMPETITIONS_INTER = [
     "Autre compétition",
 ]
 
-URL_FIXTURES = "https://www.football-data.co.uk/fixtures.csv"
-URL_NEW_FIXTURES = "https://www.football-data.co.uk/new_league_fixtures.csv"
-NAVIGATEUR = {"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"}
-
 LOG = "predictions_log.csv"
 KS = np.arange(10)
 FACT = np.array([factorial(k) for k in range(10)], dtype=float)
-MASQUE_OVER = (KS[:, None] + KS[None, :]) > 2
+SOMME = KS[:, None] + KS[None, :]
 COLS_REC = ["Date", "HomeTeam", "AwayTeam", "lh", "la", "hg", "ag"]
-COLS_CAL = ["code", "Date", "Time", "HomeTeam", "AwayTeam"]
+MAX_AFFICHE = 20
+
 
 def rec_vide():
     return pd.DataFrame({
@@ -77,19 +68,13 @@ def rec_vide():
         "hg": pd.Series(dtype=float),
         "ag": pd.Series(dtype=float)})
 
-def cal_vide():
-    return pd.DataFrame({
-        "code": pd.Series(dtype=object),
-        "Date": pd.Series(dtype="datetime64[ns]"),
-        "Time": pd.Series(dtype=object),
-        "HomeTeam": pd.Series(dtype=object),
-        "AwayTeam": pd.Series(dtype=object)})
 
 def lire_dates(s):
     try:
         return pd.to_datetime(s, dayfirst=True, errors="coerce", format="mixed")
     except (ValueError, TypeError):
         return pd.to_datetime(s, dayfirst=True, errors="coerce")
+
 
 def nettoyer(d):
     d = d[["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]].copy()
@@ -98,6 +83,7 @@ def nettoyer(d):
     d["FTHG"] = d["FTHG"].astype(int)
     d["FTAG"] = d["FTAG"].astype(int)
     return d.sort_values("Date", kind="stable").reset_index(drop=True)
+
 
 @st.cache_data(show_spinner=False)
 def charger(code):
@@ -125,44 +111,6 @@ def charger(code):
     except Exception:
         return pd.DataFrame()
 
-def telecharger_csv(url):
-    r = requests.get(url, headers=NAVIGATEUR, timeout=20)
-    r.raise_for_status()
-    return pd.read_csv(io.StringIO(r.content.decode("latin-1")),
-                       on_bad_lines="skip")
-
-@st.cache_data(show_spinner=False, ttl=1800)
-def calendrier_cache():
-    morceaux, erreurs = [], []
-    try:
-        f = telecharger_csv(URL_FIXTURES)
-        f["code"] = f["Div"]
-        morceaux.append(f.reindex(columns=COLS_CAL))
-    except Exception as e:
-        erreurs.append(f"fixtures.csv : {type(e).__name__} {e}")
-    try:
-        n = telecharger_csv(URL_NEW_FIXTURES)
-        n = n.rename(columns={"Home": "HomeTeam", "Away": "AwayTeam"})
-        inverse = {v: k for k, v in PAYS_NEW.items()}
-        n["code"] = n["Country"].astype(str).str.strip().str.lower().map(inverse)
-        morceaux.append(n.reindex(columns=COLS_CAL))
-    except Exception as e:
-        erreurs.append(f"new_league_fixtures.csv : {type(e).__name__} {e}")
-    if not morceaux:
-        raise RuntimeError(" | ".join(erreurs))
-    c = pd.concat(morceaux, ignore_index=True)
-    c["Date"] = lire_dates(c["Date"])
-    c = c.dropna(subset=["code", "Date", "HomeTeam", "AwayTeam"])
-    c = c[c["code"].isin(TOUS_CODES)]
-    if c.empty:
-        return cal_vide()
-    return c.sort_values(["Date", "Time"]).reset_index(drop=True)
-
-def calendrier():
-    try:
-        return calendrier_cache(), ""
-    except Exception as e:
-        return cal_vide(), f"{type(e).__name__} : {e}"
 
 @st.cache_data(show_spinner=False)
 def forces(d):
@@ -182,8 +130,10 @@ def forces(d):
         dfn[eq] = enc / moy
     return att, dfn, mh, ma
 
+
 def lambdas_brutes(dom, ext, att, dfn, mh, ma):
     return att[dom] * dfn[ext] * mh, att[ext] * dfn[dom] * ma
+
 
 def lambdas_manuelles(att_a, def_a, att_b, def_b, neutre):
     lh = (att_a + def_b) / 2
@@ -192,6 +142,7 @@ def lambdas_manuelles(att_a, def_a, att_b, def_b, neutre):
         lh *= 1.10
         la *= 0.95
     return max(lh, 0.05), max(la, 0.05)
+
 
 def matrice(lh, la, nul=1.0):
     ph = np.exp(-lh) * lh ** KS / FACT
@@ -204,25 +155,13 @@ def matrice(lh, la, nul=1.0):
         m = m / m.sum()
     return m
 
+
 def issues(m):
     return np.tril(m, -1).sum(), np.trace(m), np.triu(m, 1).sum()
 
-SOMME = KS[:, None] + KS[None, :]
-REUSSITE = {
-    "1": lambda h, a: h > a,
-    "N": lambda h, a: h == a,
-    "2": lambda h, a: h < a,
-    "1N": lambda h, a: h >= a,
-    "N2": lambda h, a: h <= a,
-    "12": lambda h, a: h != a,
-    "+1,5 buts": lambda h, a: h + a >= 2,
-    "+2,5 buts": lambda h, a: h + a >= 3,
-    "-2,5 buts": lambda h, a: h + a <= 2,
-    "-3,5 buts": lambda h, a: h + a <= 3,
-    "Les 2 marquent": lambda h, a: h > 0 and a > 0,
-    "Une équipe ne marque pas": lambda h, a: h == 0 or a == 0,
-}
+
 POOL = ["1", "2", "1N", "N2", "12"]
+
 
 def probas_marches(m):
     p1, pn, p2 = issues(m)
@@ -235,9 +174,11 @@ def probas_marches(m):
         "Les 2 marquent": deux, "Une équipe ne marque pas": 1 - deux,
     }
 
+
 def meilleur_pari(pm):
     nom = max(POOL, key=lambda k: pm[k])
     return nom, pm[nom]
+
 
 def prevoir(lh, la, corr):
     m = matrice(lh * corr["kh"], la * corr["ka"], corr["nul"])
@@ -247,7 +188,9 @@ def prevoir(lh, la, corr):
     top3 = [(int(i // 10), int(i % 10), float(m[i // 10, i % 10])) for i in idx]
     return {"pm": pm, "top3": top3, "pari": pari, "pari_p": float(pari_p)}
 
+
 CORR_NEUTRE = {"kh": 1.0, "ka": 1.0, "nul": 1.0, "n": 0}
+
 
 @st.cache_data(show_spinner=False)
 def backtest(d, n_max=300):
@@ -265,6 +208,7 @@ def backtest(d, n_max=300):
     if not lignes:
         return rec_vide()
     return pd.DataFrame(lignes, columns=COLS_REC)
+
 
 def resultats_journal(code, d):
     if not os.path.exists(LOG):
@@ -285,6 +229,7 @@ def resultats_journal(code, d):
     except Exception:
         return rec_vide()
 
+
 def corrections(rec):
     n = len(rec)
     if n < 30:
@@ -299,9 +244,10 @@ def corrections(rec):
             "ka": float(np.clip(ka, 0.8, 1.25)),
             "nul": float(np.clip(nul, 0.75, 1.35)), "n": n}
 
-def carte(dom, ext, prev):
+
+def carte(titre, ext, prev):
     pm = prev["pm"]
-    st.markdown(f"**{dom} vs {ext}**")
+    st.markdown(f"**{titre} vs {ext}**")
     c1, c2, c3 = st.columns(3)
     c1.metric("1", f"{pm['1'] * 100:.0f}%")
     c2.metric("N", f"{pm['N'] * 100:.0f}%")
@@ -315,50 +261,67 @@ def carte(dom, ext, prev):
         f"{i}-{j} ({p * 100:.0f}%)" for i, j, p in prev["top3"]))
     st.divider()
 
+
+# ---------------------------------------------------------------
+# LECTURE DU PROGRAMME (photo / PDF / texte)
+# ---------------------------------------------------------------
+SEP = re.compile(r"\s+(?:-|–|—|vs\.?|v|contre|x)\s+", re.I)
+
+
+def extraire_texte(octets, nom):
+    try:
+        if nom.lower().endswith(".pdf"):
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(octets)) as pdf:
+                return "\n".join((p.extract_text() or "") for p in pdf.pages)
+        import pytesseract
+        from PIL import Image
+        return pytesseract.image_to_string(Image.open(io.BytesIO(octets)))
+    except Exception:
+        return ""
+
+
+def extraire_matchs(texte):
+    matchs = []
+    for l in texte.splitlines():
+        l = re.sub(r"\d{1,2}[:h]\d{2}", " ", l)
+        l = re.sub(r"\d{1,2}/\d{1,2}(/\d{2,4})?", " ", l)
+        l = re.sub(r"^\s*\d+\s*[.)]\s*", "", l)
+        l = re.sub(r"\s+", " ", l).strip()
+        p = SEP.split(l, maxsplit=1)
+        if len(p) == 2:
+            a, b = p[0].strip(), p[1].strip()
+            if 2 <= len(a) <= 30 and 2 <= len(b) <= 30:
+                matchs.append((a, b))
+    return matchs
+
+
+def trouver_equipe(nom, equipes):
+    r = difflib.get_close_matches(nom, equipes, n=1, cutoff=0.6)
+    return r[0] if r else None
+
+
 def lire_qr_code(image_bytes):
+    if cv2 is None:
+        return None, "Lecture QR indisponible."
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             return None, "Impossible de décoder l'image."
-        detector = cv2.QRCodeDetector()
-        data, points, _ = detector.detectAndDecode(img)
+        data, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
         if data:
             return data, None
-        else:
-            return None, "Aucun QR code détecté sur l'image."
+        return None, "Aucun QR code détecté."
     except Exception as e:
         return None, f"Erreur lors de la lecture : {e}"
+
 
 def saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code):
     if "matchs_manuels" not in st.session_state:
         st.session_state["matchs_manuels"] = []
 
-    with st.expander("📸 Saisie manuelle, Scan QR Code Elephant Bet & Photo", expanded=True):
-        
-        st.markdown("### Scanner un ticket / Fiche Elephant Bet ou importer une image")
-        photo_prise = st.camera_input("Prendre en photo un bulletin ou QR code")
-        fichier_charge = st.file_uploader("Ou importer un fichier (Image, PDF...)", type=["jpg", "jpeg", "png", "pdf"])
-        
-        image_a_analyser = photo_prise if photo_prise else fichier_charge
-        
-        if image_a_analyser is not None:
-            bytes_data = image_a_analyser.getvalue()
-            data_qr, erreur_qr = lire_qr_code(bytes_data)
-            
-            if data_qr:
-                st.success("🔍 **QR Code détecté avec succès !**")
-                st.code(data_qr, language="text")
-                if data_qr.startswith("http"):
-                    st.info("Ce QR code contient un lien vers Elephant Bet.")
-                    if st.button("🌐 Ouvrir la vérification sur Elephant Bet"):
-                        webbrowser.open(data_qr)
-                else:
-                    st.info("Code de réservation ou identifiant détecté.")
-            else:
-                st.warning(f"⚠️ {erreur_qr} (L'analyse manuelle reste disponible ci-dessous).")
-
-        st.markdown("---")
+    with st.expander("✍️ Saisie manuelle d'un match", expanded=False):
         options = list(COMPETITIONS_INTER)
         if att:
             options = [f"Championnat : {nom_champ}"] + options
@@ -395,7 +358,8 @@ def saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code):
                     st.warning("Écris deux équipes différentes.")
                 else:
                     lh, la = lambdas_manuelles(att_a, def_a, att_b, def_b, neutre)
-                    nouveau = (comp, nom_a.strip(), nom_b.strip(), prevoir(lh, la, CORR_NEUTRE))
+                    nouveau = (comp, nom_a.strip(), nom_b.strip(),
+                               prevoir(lh, la, CORR_NEUTRE))
 
         if nouveau:
             st.session_state["matchs_manuels"].insert(0, nouveau)
@@ -409,6 +373,57 @@ def saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code):
                 st.session_state["matchs_manuels"] = []
                 st.rerun()
 
+
+def zone_programme(att, dfn, mh, ma, corr):
+    st.subheader("📄 Programme des matchs")
+    st.info("Photographie ou importe le programme (photo ou PDF). "
+            "Tu peux aussi écrire ou coller les matchs, un par ligne : "
+            "Équipe A - Équipe B")
+
+    photo = st.camera_input("📷 Photographier le programme", key="prog_photo")
+    fichier = st.file_uploader("📁 Importer une photo ou un PDF",
+                               type=["jpg", "jpeg", "png", "pdf"], key="prog_file")
+    source = photo if photo else fichier
+
+    texte = ""
+    if source is not None:
+        octets = source.getvalue()
+        texte = extraire_texte(octets, getattr(source, "name", "photo.jpg"))
+        if not texte.strip():
+            st.warning("Lecture automatique impossible. "
+                       "Écris ou colle les matchs dans la case ci-dessous.")
+        qr, _ = lire_qr_code(octets)
+        if qr:
+            st.caption(f"QR code détecté : {qr}")
+
+    texte = st.text_area("Matchs (modifiable)", value=texte, height=150,
+                         key="prog_texte")
+    maxi = st.slider("Nombre maximum de matchs affichés", 5, 100, MAX_AFFICHE, 5)
+
+    liste = extraire_matchs(texte)
+    if not liste:
+        st.caption("Aucun match détecté pour le moment.")
+        return 0
+
+    st.success(f"{len(liste)} match(s) détecté(s) — "
+               f"affichage des {min(len(liste), maxi)} premiers")
+    equipes = sorted(att.keys()) if att else []
+    for i, (a, b) in enumerate(liste[:maxi], start=1):
+        dom = trouver_equipe(a, equipes) if equipes else None
+        ext = trouver_equipe(b, equipes) if equipes else None
+        if dom and ext and dom != ext:
+            lh, la = lambdas_brutes(dom, ext, att, dfn, mh, ma)
+            carte(f"{i}. {dom}", ext, prevoir(lh, la, corr))
+        else:
+            lh, la = lambdas_manuelles(1.4, 1.0, 1.2, 1.1, False)
+            carte(f"{i}. {a}", b, prevoir(lh, la, CORR_NEUTRE))
+            st.caption("⚠️ Équipes inconnues dans ce championnat : estimation générique.")
+    return len(liste)
+
+
+# ---------------------------------------------------------------
+# INTERFACE
+# ---------------------------------------------------------------
 st.title("⚽ Pronostics Football")
 
 pays = st.selectbox("Pays", list(PAYS.keys()))
@@ -417,22 +432,14 @@ div_nom = st.selectbox("Division", list(divisions.keys()))
 code = divisions[div_nom]
 nom_champ = f"{pays} - {div_nom}"
 
-ref = st.date_input("Choisis une date de la semaine", value=date.today())
-lundi = ref - timedelta(days=ref.weekday())
-dimanche = lundi + timedelta(days=6)
-st.caption(f"Semaine du {lundi:%d/%m/%Y} au {dimanche:%d/%m/%Y}")
-seuil = st.slider("Confiance minimale du pari conseillé (%)", 50, 90, 70, 5) / 100
-
-zone_manuelle = st.container()
-
 with st.spinner("Chargement..."):
     donnees = charger(code)
-    cal, erreur_cal = calendrier()
 
 if donnees.empty:
-    st.warning("Impossible de charger les données automatiques de ce championnat. Utilisez la saisie manuelle, la caméra ou les fichiers ci-dessous.")
-    with zone_manuelle:
-        saisie_manuelle(None, None, None, None, CORR_NEUTRE, nom_champ, code)
+    st.warning("Données automatiques indisponibles pour ce championnat. "
+               "Les matchs seront calculés avec une estimation générique.")
+    zone_programme(None, None, None, None, CORR_NEUTRE)
+    saisie_manuelle(None, None, None, None, CORR_NEUTRE, nom_champ, code)
     st.stop()
 
 att, dfn, mh, ma = forces(donnees)
@@ -442,27 +449,18 @@ morceaux_rec = [x for x in (rec_log, rec_bt) if not x.empty]
 rec = pd.concat(morceaux_rec, ignore_index=True) if morceaux_rec else rec_vide()
 corr = corrections(rec)
 
-with zone_manuelle:
-    saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code)
-
-cal = cal.copy()
-cal["Date"] = pd.to_datetime(cal["Date"], errors="coerce")
-cal = cal.dropna(subset=["Date"])
-cal = cal[(cal["code"] == code) & (cal["Date"] >= pd.Timestamp(lundi)) & (cal["Date"] <= pd.Timestamp(dimanche))]
-
 onglet1, onglet2 = st.tabs(["Pronostics", "Apprentissage"])
 
 with onglet1:
-    st.subheader("Programme des matchs")
-    if erreur_cal:
-        st.info("Calendrier automatique indisponible. Vous pouvez utiliser la prise de photo ou la saisie manuelle.")
-    elif cal.empty:
-        st.info("Aucun match programmé pour cette période dans ce championnat.")
+    zone_programme(att, dfn, mh, ma, corr)
+    saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code)
+
+with onglet2:
+    st.subheader("Apprentissage")
+    st.write(f"Matchs utilisés pour corriger le modèle : **{corr['n']}**")
+    if corr["n"] < 30:
+        st.info("Pas assez de matchs : le modèle reste neutre.")
     else:
-        for _, m in cal.iterrows():
-            dom, ext = m["HomeTeam"], m["AwayTeam"]
-            if dom in att and ext in att:
-                lh, la = lambdas_brutes(dom, ext, att, dfn, mh, ma)
-                prev = prevoir(lh, la, corr)
-                if prev["pari_p"] >= seuil:
-                    carte(dom, ext, prev)
+        st.write(f"Correction domicile : x{corr['kh']:.2f}")
+        st.write(f"Correction extérieur : x{corr['ka']:.2f}")
+        st.write(f"Correction matchs nuls : x{corr['nul']:.2f}")
