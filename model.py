@@ -1,4 +1,6 @@
+import io
 import os
+import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -35,6 +37,26 @@ PAYS_NEW = {
     "MEX": "mexico", "NOR": "norway", "POL": "poland", "ROU": "romania",
     "RUS": "russia", "SWE": "sweden", "SWZ": "switzerland", "USA": "usa",
 }
+
+COMPETITIONS_INTER = [
+    "Coupe d'Afrique des Nations (CAN)",
+    "Coupe du monde FIFA",
+    "Coupe d'Asie des Nations",
+    "Copa América",
+    "Euro (UEFA)",
+    "Gold Cup (CONCACAF)",
+    "Ligue des nations UEFA",
+    "Éliminatoires Coupe du monde",
+    "Éliminatoires CAN",
+    "Ligue des champions CAF",
+    "Match amical international",
+    "Autre compétition",
+]
+
+URL_FIXTURES = "https://www.football-data.co.uk/fixtures.csv"
+URL_NEW_FIXTURES = "https://www.football-data.co.uk/new_league_fixtures.csv"
+NAVIGATEUR = {"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"}
 
 LOG = "predictions_log.csv"          # journal des pronostics (apprentissage)
 KS = np.arange(10)
@@ -109,37 +131,49 @@ def charger(code):
         return pd.DataFrame()
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def calendrier():
-    morceaux = []
+def telecharger_csv(url):
+    r = requests.get(url, headers=NAVIGATEUR, timeout=20)
+    r.raise_for_status()
+    return pd.read_csv(io.StringIO(r.content.decode("latin-1")),
+                       on_bad_lines="skip")
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def calendrier_cache():
+    """Si le téléchargement échoue, on lève une erreur : Streamlit ne
+    garde alors PAS l'échec en cache."""
+    morceaux, erreurs = [], []
     try:
-        f = pd.read_csv("https://www.football-data.co.uk/fixtures.csv",
-                        encoding="latin-1", on_bad_lines="skip")
+        f = telecharger_csv(URL_FIXTURES)
         f["code"] = f["Div"]
         morceaux.append(f.reindex(columns=COLS_CAL))
-    except Exception:
-        pass
+    except Exception as e:
+        erreurs.append(f"fixtures.csv : {type(e).__name__} {e}")
     try:
-        n = pd.read_csv("https://www.football-data.co.uk/new_league_fixtures.csv",
-                        encoding="latin-1", on_bad_lines="skip")
+        n = telecharger_csv(URL_NEW_FIXTURES)
         n = n.rename(columns={"Home": "HomeTeam", "Away": "AwayTeam"})
         inverse = {v: k for k, v in PAYS_NEW.items()}
         n["code"] = n["Country"].astype(str).str.strip().str.lower().map(inverse)
         morceaux.append(n.reindex(columns=COLS_CAL))
-    except Exception:
-        pass
+    except Exception as e:
+        erreurs.append(f"new_league_fixtures.csv : {type(e).__name__} {e}")
     if not morceaux:
+        raise RuntimeError(" | ".join(erreurs))
+    c = pd.concat(morceaux, ignore_index=True)
+    c["Date"] = lire_dates(c["Date"])
+    c = c.dropna(subset=["code", "Date", "HomeTeam", "AwayTeam"])
+    c = c[c["code"].isin(TOUS_CODES)]
+    if c.empty:
         return cal_vide()
+    return c.sort_values(["Date", "Time"]).reset_index(drop=True)
+
+
+def calendrier():
+    """Renvoie (tableau, message d'erreur). Message vide = chargement réussi."""
     try:
-        c = pd.concat(morceaux, ignore_index=True)
-        c["Date"] = lire_dates(c["Date"])
-        c = c.dropna(subset=["code", "Date", "HomeTeam", "AwayTeam"])
-        c = c[c["code"].isin(TOUS_CODES)]
-        if c.empty:
-            return cal_vide()
-        return c.sort_values(["Date", "Time"]).reset_index(drop=True)
-    except Exception:
-        return cal_vide()
+        return calendrier_cache(), ""
+    except Exception as e:
+        return cal_vide(), f"{type(e).__name__} : {e}"
 
 
 # ---------- MODELE DE POISSON ----------
@@ -164,6 +198,16 @@ def forces(d):
 
 def lambdas_brutes(dom, ext, att, dfn, mh, ma):
     return att[dom] * dfn[ext] * mh, att[ext] * dfn[dom] * ma
+
+
+def lambdas_manuelles(att_a, def_a, att_b, def_b, neutre):
+    """Buts attendus à partir des moyennes saisies à la main."""
+    lh = (att_a + def_b) / 2
+    la = (att_b + def_a) / 2
+    if not neutre:
+        lh *= 1.10
+        la *= 0.95
+    return max(lh, 0.05), max(la, 0.05)
 
 
 def matrice(lh, la, nul=1.0):
@@ -357,6 +401,71 @@ def carte(dom, ext, prev):
     st.divider()
 
 
+def saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code):
+    """Saisie d'un match à la main : championnat sélectionné ou compétition
+    internationale (CAN, Coupe du monde, Copa...)."""
+    if "matchs_manuels" not in st.session_state:
+        st.session_state["matchs_manuels"] = []
+
+    with st.expander("✍️ Saisie manuelle d'un match", expanded=True):
+        options = list(COMPETITIONS_INTER)
+        if att:
+            options = [f"Championnat : {nom_champ}"] + options
+        comp = st.selectbox("Compétition", options, key="man_comp")
+        nouveau = None
+
+        if att and comp.startswith("Championnat"):
+            equipes = sorted(att.keys())
+            dom = st.selectbox("Équipe à domicile", equipes, key=f"man_dom_{code}")
+            ext = st.selectbox("Équipe à l'extérieur", equipes,
+                               index=1 if len(equipes) > 1 else 0,
+                               key=f"man_ext_{code}")
+            if st.button("Calculer le pronostic", key="man_btn_champ"):
+                if dom == ext:
+                    st.warning("Choisis deux équipes différentes.")
+                else:
+                    lh, la = lambdas_brutes(dom, ext, att, dfn, mh, ma)
+                    nouveau = (comp, dom, ext, prevoir(lh, la, corr))
+        else:
+            nom_a = st.text_input("Équipe 1", key="man_nom_a")
+            nom_b = st.text_input("Équipe 2", key="man_nom_b")
+            neutre = st.checkbox("Terrain neutre", value=True, key="man_neutre")
+            st.caption("Moyennes de buts par match sur les 5 à 10 derniers "
+                       "matchs de chaque équipe.")
+            c1, c2 = st.columns(2)
+            with c1:
+                att_a = st.number_input("Buts marqués (éq. 1)", 0.0, 6.0, 1.4, 0.1,
+                                        key="man_att_a")
+                def_a = st.number_input("Buts encaissés (éq. 1)", 0.0, 6.0, 1.0, 0.1,
+                                        key="man_def_a")
+            with c2:
+                att_b = st.number_input("Buts marqués (éq. 2)", 0.0, 6.0, 1.2, 0.1,
+                                        key="man_att_b")
+                def_b = st.number_input("Buts encaissés (éq. 2)", 0.0, 6.0, 1.1, 0.1,
+                                        key="man_def_b")
+            if st.button("Calculer le pronostic", key="man_btn_inter"):
+                if not nom_a.strip() or not nom_b.strip():
+                    st.warning("Écris le nom des deux équipes.")
+                elif nom_a.strip().lower() == nom_b.strip().lower():
+                    st.warning("Écris deux équipes différentes.")
+                else:
+                    lh, la = lambdas_manuelles(att_a, def_a, att_b, def_b, neutre)
+                    nouveau = (comp, nom_a.strip(), nom_b.strip(),
+                               prevoir(lh, la, CORR_NEUTRE))
+
+        if nouveau:
+            st.session_state["matchs_manuels"].insert(0, nouveau)
+
+        for titre, d, e, prev in st.session_state["matchs_manuels"]:
+            st.caption(titre)
+            carte(d, e, prev)
+
+        if st.session_state["matchs_manuels"]:
+            if st.button("Vider la liste", key="man_clear"):
+                st.session_state["matchs_manuels"] = []
+                st.rerun()
+
+
 # ---------- INTERFACE ----------
 st.title("⚽ Pronostics Football")
 
@@ -364,20 +473,26 @@ pays = st.selectbox("Pays", list(PAYS.keys()))
 divisions = PAYS[pays]
 div_nom = st.selectbox("Division", list(divisions.keys()))
 code = divisions[div_nom]
+nom_champ = f"{pays} - {div_nom}"
 
 ref = st.date_input("Choisis une date de la semaine", value=date.today())
 lundi = ref - timedelta(days=ref.weekday())
 dimanche = lundi + timedelta(days=6)
 st.caption(f"Semaine du {lundi:%d/%m/%Y} au {dimanche:%d/%m/%Y}")
-choix = st.selectbox("Jour", ["Toute la semaine"] + JOURS)
 seuil = st.slider("Confiance minimale du pari conseillé (%)", 50, 90, 70, 5) / 100
+
+# Emplacement de la saisie manuelle (remplie plus bas, quand les données sont prêtes)
+zone_manuelle = st.container()
 
 with st.spinner("Chargement..."):
     donnees = charger(code)
-    cal = calendrier()
+    cal, erreur_cal = calendrier()
 
 if donnees.empty:
-    st.error("Impossible de charger les données de ce championnat.")
+    st.error("Impossible de charger les données de ce championnat. "
+             "Tu peux quand même utiliser la saisie manuelle internationale.")
+    with zone_manuelle:
+        saisie_manuelle(None, None, None, None, CORR_NEUTRE, nom_champ, code)
     st.stop()
 
 att, dfn, mh, ma = forces(donnees)
@@ -393,23 +508,27 @@ else:
     rec = rec_vide()
 corr = corrections(rec)
 
-calendrier_charge = not cal.empty
+with zone_manuelle:
+    saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code)
+
 cal = cal.copy()
 cal["Date"] = pd.to_datetime(cal["Date"], errors="coerce")
 cal = cal.dropna(subset=["Date"])
 cal = cal[(cal["code"] == code)
           & (cal["Date"] >= pd.Timestamp(lundi))
           & (cal["Date"] <= pd.Timestamp(dimanche))]
-if choix != "Toute la semaine" and not cal.empty:
-    cal = cal[cal["Date"].dt.weekday == JOURS.index(choix)]
 
 onglet1, onglet2 = st.tabs(["Pronostics", "Apprentissage"])
 
 with onglet1:
     st.subheader("Programme des matchs")
-    if not calendrier_charge:
-        st.warning("Le calendrier des matchs n'a pas pu être chargé. "
-                   "Réessaie dans quelques minutes.")
+    if erreur_cal:
+        st.warning("Le calendrier automatique n'a pas pu être chargé. "
+                   "Utilise la saisie manuelle ci-dessus.")
+        st.caption(f"Détail technique : {erreur_cal}")
+        if st.button("Recharger le calendrier"):
+            calendrier_cache.clear()
+            st.rerun()
     elif cal.empty:
         st.info("Aucun match programmé pour cette période.")
     else:
