@@ -1,4 +1,7 @@
-import io, os, re, difflib
+import io
+import os
+import re
+import difflib
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -31,14 +34,22 @@ PAYS = {
     "Suisse": {D1: "SWZ"}, "États-Unis": {D1: "USA"},
 }
 SAISONS = ["2223", "2324", "2425", "2526", "2627"]
+
 COMPETITIONS_INTER = [
-    "Coupe d'Afrique des Nations (CAN)", "Coupe du monde FIFA",
-    "Coupe d'Asie des Nations", "Copa América", "Euro (UEFA)",
-    "Gold Cup (CONCACAF)", "Ligue des nations UEFA",
-    "Éliminatoires Coupe du monde", "Éliminatoires CAN",
-    "Ligue des champions CAF", "Match amical international",
+    "Coupe d'Afrique des Nations (CAN)",
+    "Coupe du monde FIFA",
+    "Coupe d'Asie des Nations",
+    "Copa América",
+    "Euro (UEFA)",
+    "Gold Cup (CONCACAF)",
+    "Ligue des nations UEFA",
+    "Éliminatoires Coupe du monde",
+    "Éliminatoires CAN",
+    "Ligue des champions CAF",
+    "Match amical international",
     "Autre compétition",
 ]
+
 LOG = "predictions_log.csv"
 KS = np.arange(10)
 FACT = np.array([factorial(k) for k in range(10)], dtype=float)
@@ -52,8 +63,10 @@ def rec_vide():
         "Date": pd.Series(dtype="datetime64[ns]"),
         "HomeTeam": pd.Series(dtype=object),
         "AwayTeam": pd.Series(dtype=object),
-        "lh": pd.Series(dtype=float), "la": pd.Series(dtype=float),
-        "hg": pd.Series(dtype=float), "ag": pd.Series(dtype=float)})
+        "lh": pd.Series(dtype=float),
+        "la": pd.Series(dtype=float),
+        "hg": pd.Series(dtype=float),
+        "ag": pd.Series(dtype=float)})
 
 
 def lire_dates(s):
@@ -108,7 +121,8 @@ def forces(d):
     moy = (mh + ma) / 2
     att, dfn = {}, {}
     for eq in set(d["HomeTeam"]) | set(d["AwayTeam"]):
-        h = d[d["HomeTeam"] == eq]; a = d[d["AwayTeam"] == eq]
+        h = d[d["HomeTeam"] == eq]
+        a = d[d["AwayTeam"] == eq]
         wtot = h["w"].sum() + a["w"].sum()
         marq = (np.sum(h["FTHG"] * h["w"]) + np.sum(a["FTAG"] * a["w"])) / wtot
         enc = (np.sum(h["FTAG"] * h["w"]) + np.sum(a["FTHG"] * a["w"])) / wtot
@@ -117,20 +131,28 @@ def forces(d):
     return att, dfn, mh, ma
 
 
+def lambdas_brutes(dom, ext, att, dfn, mh, ma):
+    return att[dom] * dfn[ext] * mh, att[ext] * dfn[dom] * ma
+
+
 def lambdas_manuelles(att_a, def_a, att_b, def_b, neutre):
     lh = (att_a + def_b) / 2
     la = (att_b + def_a) / 2
     if not neutre:
-        lh *= 1.10; la *= 0.95
+        lh *= 1.10
+        la *= 0.95
     return max(lh, 0.05), max(la, 0.05)
 
 
 def matrice(lh, la, nul=1.0):
     ph = np.exp(-lh) * lh ** KS / FACT
     pa = np.exp(-la) * la ** KS / FACT
-    m = np.outer(ph, pa); m = m / m.sum()
+    m = np.outer(ph, pa)
+    m = m / m.sum()
     if nul != 1.0:
-        m = m.copy(); m[KS, KS] = m[KS, KS] * nul; m = m / m.sum()
+        m = m.copy()
+        m[KS, KS] = m[KS, KS] * nul
+        m = m / m.sum()
     return m
 
 
@@ -172,7 +194,8 @@ CORR_NEUTRE = {"kh": 1.0, "ka": 1.0, "nul": 1.0, "n": 0}
 
 @st.cache_data(show_spinner=False)
 def backtest(d, n_max=300):
-    n = len(d); k = min(n_max, int(n * 0.25))
+    n = len(d)
+    k = min(n_max, int(n * 0.25))
     if k < 30:
         return rec_vide()
     train, test = d.iloc[: n - k], d.iloc[n - k:]
@@ -180,17 +203,19 @@ def backtest(d, n_max=300):
     lignes = []
     for r in test.itertuples():
         if r.HomeTeam in att and r.AwayTeam in att:
-            lh = att[r.HomeTeam] * dfn[r.AwayTeam] * mh
-            la = att[r.AwayTeam] * dfn[r.HomeTeam] * ma
+            lh, la = lambdas_brutes(r.HomeTeam, r.AwayTeam, att, dfn, mh, ma)
             lignes.append((r.Date, r.HomeTeam, r.AwayTeam, lh, la, r.FTHG, r.FTAG))
-    return pd.DataFrame(lignes, columns=COLS_REC) if lignes else rec_vide()
+    if not lignes:
+        return rec_vide()
+    return pd.DataFrame(lignes, columns=COLS_REC)
 
 
 def resultats_journal(code, d):
     if not os.path.exists(LOG):
         return rec_vide()
     try:
-        j = pd.read_csv(LOG); j = j[j["code"] == code].copy()
+        j = pd.read_csv(LOG)
+        j = j[j["code"] == code].copy()
         if j.empty:
             return rec_vide()
         j["Date"] = pd.to_datetime(j["Date"], errors="coerce").astype("datetime64[ns]")
@@ -212,8 +237,8 @@ def corrections(rec):
     w = n / (n + 50)
     nul_pred = np.mean([np.trace(matrice(r.lh, r.la)) for r in rec.itertuples()])
     nul_obs = float((rec["hg"] == rec["ag"]).mean())
-    kh = 1 + w * (rec["hg"].mean() / max(rec["lh"].mean(), 1e-6) - 1)
-    ka = 1 + w * (rec["ag"].mean() / max(rec["la"].mean(), 1e-6) - 1)
+    kh = 1 + w * (rec["hg"].mean() / rec["lh"].mean() - 1)
+    ka = 1 + w * (rec["ag"].mean() / rec["la"].mean() - 1)
     nul = 1 + w * (nul_obs / nul_pred - 1)
     return {"kh": float(np.clip(kh, 0.8, 1.25)),
             "ka": float(np.clip(ka, 0.8, 1.25)),
@@ -237,77 +262,23 @@ def carte(titre, ext, prev):
     st.divider()
 
 
-# ============ OCR (inchangé) ============
+# ---------------------------------------------------------------
+# LECTURE DU PROGRAMME (photo / PDF / texte)
+# ---------------------------------------------------------------
 SEP = re.compile(r"\s+(?:-|–|—|vs\.?|v|contre|x)\s+", re.I)
 
 
-def verifier_ocr():
-    try:
-        import pytesseract
-    except ImportError:
-        return False, "module python 'pytesseract' non installé"
-    try:
-        v = pytesseract.get_tesseract_version()
-        return True, f"Tesseract {v}"
-    except Exception as e:
-        return False, f"binaire 'tesseract' introuvable ({e})"
-
-
-def pretraiter_image(im):
-    from PIL import ImageOps
-    im = ImageOps.exif_transpose(im).convert("L")
-    w, h = im.size
-    if max(w, h) < 1600:
-        f = 1600 / max(w, h)
-        im = im.resize((int(w * f), int(h * f)))
-    return ImageOps.autocontrast(im)
-
-
-def ocr_image(im):
-    try:
-        import pytesseract
-    except ImportError:
-        return ""
-    im = pretraiter_image(im)
-    try:
-        return pytesseract.image_to_string(im, lang="fra")
-    except Exception:
-        try:
-            return pytesseract.image_to_string(im)
-        except Exception:
-            return ""
-
-
 def extraire_texte(octets, nom):
-    nom = (nom or "").lower()
-    if nom.endswith(".pdf"):
-        erreurs = []
-        try:
+    try:
+        if nom.lower().endswith(".pdf"):
             import pdfplumber
             with pdfplumber.open(io.BytesIO(octets)) as pdf:
-                txt = "\n".join((p.extract_text() or "") for p in pdf.pages)
-            if txt.strip():
-                return txt, None
-        except Exception as e:
-            erreurs.append(f"pdfplumber: {e}")
-        try:
-            import pypdfium2 as pdfium
-            doc = pdfium.PdfDocument(octets)
-            txt = "\n".join(ocr_image(p.render(scale=2).to_pil()) for p in doc)
-            if txt.strip():
-                return txt, None
-            erreurs.append("OCR PDF vide")
-        except Exception as e:
-            erreurs.append(f"OCR PDF: {e}")
-        return "", " | ".join(erreurs) or "PDF illisible"
-    try:
+                return "\n".join((p.extract_text() or "") for p in pdf.pages)
+        import pytesseract
         from PIL import Image
-        txt = ocr_image(Image.open(io.BytesIO(octets)))
-        if txt.strip():
-            return txt, None
-        return "", "Aucun texte détecté dans l'image"
-    except Exception as e:
-        return "", f"OCR image: {e}"
+        return pytesseract.image_to_string(Image.open(io.BytesIO(octets)))
+    except Exception:
+        return ""
 
 
 def extraire_matchs(texte):
@@ -339,60 +310,37 @@ def lire_qr_code(image_bytes):
         if img is None:
             return None, "Impossible de décoder l'image."
         data, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
-        return (data, None) if data else (None, "Aucun QR code détecté.")
+        if data:
+            return data, None
+        return None, "Aucun QR code détecté."
     except Exception as e:
-        return None, f"Erreur : {e}"
+        return None, f"Erreur lors de la lecture : {e}"
 
 
-# ============ MULTI-LIGUE ============
-def lister_ligues():
-    return [(f"{pays} - {div}", code)
-            for pays, divs in PAYS.items() for div, code in divs.items()]
-
-
-def construire_index(donnees_multi):
-    """{nom_ligue: (code, df)} -> index équipe + conflits éventuels."""
-    index, conflits = {}, {}
-    for nom_ligue, (code, d) in donnees_multi.items():
-        if d.empty:
-            continue
-        att, dfn, mh, ma = forces(d)
-        for eq in att:
-            if eq in index:
-                conflits.setdefault(eq, [index[eq]["ligue"]]).append(nom_ligue)
-                continue
-            index[eq] = {"ligue": nom_ligue, "code": code,
-                         "att": att[eq], "dfn": dfn[eq], "mh": mh, "ma": ma}
-    return index, conflits
-
-
-def lambdas_multi(eq_dom, eq_ext, index):
-    a, b = index[eq_dom], index[eq_ext]
-    if a["ligue"] == b["ligue"]:
-        return max(a["att"] * b["dfn"] * a["mh"], 0.05), \
-               max(b["att"] * a["dfn"] * b["ma"], 0.05)
-    # cross-ligue : reconstruire les forces absolues puis normaliser
-    moy_a = (a["mh"] + a["ma"]) / 2
-    moy_b = (b["mh"] + b["ma"]) / 2
-    moy_g = (moy_a + moy_b) / 2
-    lh = (a["att"] * moy_a) * (b["dfn"] * moy_b) / moy_g
-    la = (b["att"] * moy_b) * (a["dfn"] * moy_a) / moy_g
-    return max(lh, 0.05), max(la, 0.05)
-
-
-def saisie_manuelle(index, corrections_par_ligue):
+def saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code):
     if "matchs_manuels" not in st.session_state:
         st.session_state["matchs_manuels"] = []
 
     with st.expander("✍️ Saisie manuelle d'un match", expanded=False):
-        ligues = sorted({v["ligue"] for v in index.values()})
-        choix = st.selectbox(
-            "Championnat", ["— Inter-championnats (libre) —"] + ligues,
-            key="man_ligue_sel")
+        options = list(COMPETITIONS_INTER)
+        if att:
+            options = [f"Championnat : {nom_champ}"] + options
+        comp = st.selectbox("Compétition", options, key="man_comp")
         nouveau = None
 
-        if choix.startswith("—"):
-            comp = st.selectbox("Compétition", COMPETITIONS_INTER, key="man_comp")
+        if att and comp.startswith("Championnat"):
+            equipes = sorted(att.keys())
+            dom = st.selectbox("Équipe à domicile", equipes, key=f"man_dom_{code}")
+            ext = st.selectbox("Équipe à l'extérieur", equipes,
+                               index=1 if len(equipes) > 1 else 0,
+                               key=f"man_ext_{code}")
+            if st.button("Calculer le pronostic", key="man_btn_champ"):
+                if dom == ext:
+                    st.warning("Choisis deux équipes différentes.")
+                else:
+                    lh, la = lambdas_brutes(dom, ext, att, dfn, mh, ma)
+                    nouveau = (comp, dom, ext, prevoir(lh, la, corr))
+        else:
             nom_a = st.text_input("Équipe 1", key="man_nom_a")
             nom_b = st.text_input("Équipe 2", key="man_nom_b")
             neutre = st.checkbox("Terrain neutre", value=True, key="man_neutre")
@@ -412,40 +360,25 @@ def saisie_manuelle(index, corrections_par_ligue):
                     lh, la = lambdas_manuelles(att_a, def_a, att_b, def_b, neutre)
                     nouveau = (comp, nom_a.strip(), nom_b.strip(),
                                prevoir(lh, la, CORR_NEUTRE))
-        else:
-            equipes = sorted(eq for eq, v in index.items() if v["ligue"] == choix)
-            dom = st.selectbox("Équipe à domicile", equipes, key="man_dom_multi")
-            ext = st.selectbox("Équipe à l'extérieur", equipes,
-                               index=1 if len(equipes) > 1 else 0, key="man_ext_multi")
-            if st.button("Calculer le pronostic", key="man_btn_multi"):
-                if dom == ext:
-                    st.warning("Choisis deux équipes différentes.")
-                else:
-                    lh, la = lambdas_multi(dom, ext, index)
-                    corr = corrections_par_ligue.get(choix, CORR_NEUTRE)
-                    nouveau = (choix, dom, ext, prevoir(lh, la, corr))
 
         if nouveau:
             st.session_state["matchs_manuels"].insert(0, nouveau)
+
         for titre, d, e, prev in st.session_state["matchs_manuels"]:
-            st.caption(titre); carte(d, e, prev)
+            st.caption(titre)
+            carte(d, e, prev)
+
         if st.session_state["matchs_manuels"]:
             if st.button("Vider la liste", key="man_clear"):
                 st.session_state["matchs_manuels"] = []
                 st.rerun()
 
 
-def zone_programme(index, conflits, corrections_par_ligue):
+def zone_programme(att, dfn, mh, ma, corr):
     st.subheader("📄 Programme des matchs")
-    st.info("Photographie, importe (photo/PDF) ou colle ton programme. "
-            "Un match par ligne : `Équipe A - Équipe B`. "
-            "Les matchs peuvent venir de plusieurs championnats.")
-
-    ok_ocr, msg_ocr = verifier_ocr()
-    if not ok_ocr:
-        st.error(f"⚠️ OCR indisponible : {msg_ocr}. La saisie manuelle reste utilisable.")
-    else:
-        st.caption(f"OCR prêt : {msg_ocr}")
+    st.info("Photographie ou importe le programme (photo ou PDF). "
+            "Tu peux aussi écrire ou coller les matchs, un par ligne : "
+            "Équipe A - Équipe B")
 
     photo = st.camera_input("📷 Photographier le programme", key="prog_photo")
     fichier = st.file_uploader("📁 Importer une photo ou un PDF",
@@ -455,14 +388,16 @@ def zone_programme(index, conflits, corrections_par_ligue):
     texte = ""
     if source is not None:
         octets = source.getvalue()
-        with st.spinner("Lecture du document..."):
-            texte, erreur = extraire_texte(octets, getattr(source, "name", "photo.jpg"))
-        if erreur:
-            st.warning(f"Lecture automatique : {erreur}")
+        texte = extraire_texte(octets, getattr(source, "name", "photo.jpg"))
         if not texte.strip():
-            st.info("Écris ou colle les matchs dans la case ci-dessous.")
+            st.warning("Lecture automatique impossible. "
+                       "Écris ou colle les matchs dans la case ci-dessous.")
+        qr, _ = lire_qr_code(octets)
+        if qr:
+            st.caption(f"QR code détecté : {qr}")
 
-    texte = st.text_area("Matchs (modifiable)", value=texte, height=150, key="prog_texte")
+    texte = st.text_area("Matchs (modifiable)", value=texte, height=150,
+                         key="prog_texte")
     maxi = st.slider("Nombre maximum de matchs affichés", 5, 100, MAX_AFFICHE, 5)
 
     liste = extraire_matchs(texte)
@@ -470,76 +405,62 @@ def zone_programme(index, conflits, corrections_par_ligue):
         st.caption("Aucun match détecté pour le moment.")
         return 0
 
-    st.success(f"{len(liste)} match(s) détecté(s) — affichage des "
-               f"{min(len(liste), maxi)} premiers")
-    equipes = list(index.keys())
-    nb_ok = 0
+    st.success(f"{len(liste)} match(s) détecté(s) — "
+               f"affichage des {min(len(liste), maxi)} premiers")
+    equipes = sorted(att.keys()) if att else []
     for i, (a, b) in enumerate(liste[:maxi], start=1):
-        dom = trouver_equipe(a, equipes)
-        ext = trouver_equipe(b, equipes)
+        dom = trouver_equipe(a, equipes) if equipes else None
+        ext = trouver_equipe(b, equipes) if equipes else None
         if dom and ext and dom != ext:
-            lh, la = lambdas_multi(dom, ext, index)
-            ligue = index[dom]["ligue"]
-            corr = corrections_par_ligue.get(ligue, CORR_NEUTRE)
+            lh, la = lambdas_brutes(dom, ext, att, dfn, mh, ma)
             carte(f"{i}. {dom}", ext, prevoir(lh, la, corr))
-            st.caption(f"🏆 {ligue}")
-            nb_ok += 1
         else:
             lh, la = lambdas_manuelles(1.4, 1.0, 1.2, 1.1, False)
             carte(f"{i}. {a}", b, prevoir(lh, la, CORR_NEUTRE))
-            st.caption("⚠️ Équipes non reconnues : estimation générique.")
-    if nb_ok == 0 and equipes:
-        st.info("Aucune équipe reconnue — vérifie l'orthographe ou "
-                "ajoute le championnat concerné dans la sélection en haut.")
+            st.caption("⚠️ Équipes inconnues dans ce championnat : estimation générique.")
     return len(liste)
 
 
-# ============ INTERFACE ============
+# ---------------------------------------------------------------
+# INTERFACE
+# ---------------------------------------------------------------
 st.title("⚽ Pronostics Football")
 
-ligues = lister_ligues()
-labels = [nom for nom, _ in ligues]
-labels_to_code = dict(ligues)
+pays = st.selectbox("Pays", list(PAYS.keys()))
+divisions = PAYS[pays]
+div_nom = st.selectbox("Division", list(divisions.keys()))
+code = divisions[div_nom]
+nom_champ = f"{pays} - {div_nom}"
 
-choix = st.multiselect(
-    "Championnats (sélectionne-en plusieurs pour mixer les matchs)",
-    labels, default=[labels[0]],
-    help="Chaque match du programme sera routé vers son championnat d'origine.",
-)
-if not choix:
-    st.warning("Sélectionne au moins un championnat.")
+with st.spinner("Chargement..."):
+    donnees = charger(code)
+
+if donnees.empty:
+    st.warning("Données automatiques indisponibles pour ce championnat. "
+               "Les matchs seront calculés avec une estimation générique.")
+    zone_programme(None, None, None, None, CORR_NEUTRE)
+    saisie_manuelle(None, None, None, None, CORR_NEUTRE, nom_champ, code)
     st.stop()
 
-with st.spinner(f"Chargement de {len(choix)} championnat(s)..."):
-    donnees_multi = {}
-    for nom in choix:
-        code = labels_to_code[nom]
-        d = charger(code)
-        if not d.empty:
-            donnees_multi[nom] = (code, d)
-        else:
-            st.warning(f"Données indisponibles pour {nom}.")
+att, dfn, mh, ma = forces(donnees)
+rec_log = resultats_journal(code, donnees)
+rec_bt = backtest(donnees)
+morceaux_rec = [x for x in (rec_log, rec_bt) if not x.empty]
+rec = pd.concat(morceaux_rec, ignore_index=True) if morceaux_rec else rec_vide()
+corr = corrections(rec)
 
-if not donnees_multi:
-    st.warning("Aucun championnat disponible — les matchs seront estimés génériquement.")
-    zone_programme({}, {}, {})
-    saisie_manuelle({}, {})
-    st.stop()
+onglet1, onglet2 = st.tabs(["Pronostics", "Apprentissage"])
 
-index, conflits = construire_index(donnees_multi)
+with onglet1:
+    zone_programme(att, dfn, mh, ma, corr)
+    saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code)
 
-with st.spinner("Calcul des corrections d'apprentissage..."):
-    corrections_par_ligue = {}
-    for nom, (code, d) in donnees_multi.items():
-        rec_log = resultats_journal(code, d)
-        rec_bt = backtest(d)
-        morceaux = [x for x in (rec_log, rec_bt) if not x.empty]
-        rec = pd.concat(morceaux, ignore_index=True) if morceaux else rec_vide()
-        corrections_par_ligue[nom] = corrections(rec)
-
-if conflits:
-    with st.expander(f"⚠️ {len(conflits)} équipe(s) présente(s) dans plusieurs championnats"):
-        for eq, lg in conflits.items():
-            st.write(f"- **{eq}** : {', '.join(lg)} (la 1ʳᵉ ligue est utilisée)")
-
-onglet1, onglet2 = st.tabs(["Pronostics", "Appre
+with onglet2:
+    st.subheader("Apprentissage")
+    st.write(f"Matchs utilisés pour corriger le modèle : **{corr['n']}**")
+    if corr["n"] < 30:
+        st.info("Pas assez de matchs : le modèle reste neutre.")
+    else:
+        st.write(f"Correction domicile : x{corr['kh']:.2f}")
+        st.write(f"Correction extérieur : x{corr['ka']:.2f}")
+        st.write(f"Correction matchs nuls : x{corr['nul']:.2f}")
