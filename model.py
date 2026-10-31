@@ -131,13 +131,16 @@ def forces(d):
     return att, dfn, mh, ma
 
 
-def lambdas_brutes(dom, ext, att, dfn, mh, ma):
-    return att[dom] * dfn[ext] * mh, att[ext] * dfn[dom] * ma
+def lambdas_brutes(dom, ext, att, dfn, mh, ma, abs_dom=0, abs_ext=0):
+    # Ajustement des forces en tenant compte des joueurs clés absents (réduction de l'attaque)
+    facteur_dom = max(0.5, 1.0 - (abs_dom * 0.15))
+    facteur_ext = max(0.5, 1.0 - (abs_ext * 0.15))
+    return (att[dom] * dfn[ext] * mh) * facteur_dom, (att[ext] * dfn[dom] * ma) * facteur_ext
 
 
-def lambdas_manuelles(att_a, def_a, att_b, def_b, neutre):
-    lh = (att_a + def_b) / 2
-    la = (att_b + def_a) / 2
+def lambdas_manuelles(att_a, def_a, att_b, def_b, neutre, abs_a=0, abs_b=0):
+    lh = (att_a + def_b) / 2 * max(0.5, 1.0 - (abs_a * 0.15))
+    la = (att_b + def_a) / 2 * max(0.5, 1.0 - (abs_b * 0.15))
     if not neutre:
         lh *= 1.10
         la *= 0.95
@@ -263,7 +266,7 @@ def carte(titre, ext, prev):
 
 
 # ---------------------------------------------------------------
-# LECTURE DU PROGRAMME (photo / PDF / texte)
+# LECTURE DU PROGRAMME (photo / PDF / texte / QR)
 # ---------------------------------------------------------------
 SEP = re.compile(r"\s+(?:-|–|—|vs\.?|v|contre|x)\s+", re.I)
 
@@ -334,30 +337,42 @@ def saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code):
             ext = st.selectbox("Équipe à l'extérieur", equipes,
                                index=1 if len(equipes) > 1 else 0,
                                key=f"man_ext_{code}")
+            
+            # Options d'absences et faiblesses
+            col_abs1, col_abs2 = st.columns(2)
+            with col_abs1:
+                abs_dom = st.slider(f"Joueurs clés absents ({dom})", 0, 4, 0, key="abs_dom_champ")
+            with col_abs2:
+                abs_ext = st.slider(f"Joueurs clés absents ({ext})", 0, 4, 0, key="abs_ext_champ")
+
             if st.button("Calculer le pronostic", key="man_btn_champ"):
                 if dom == ext:
                     st.warning("Choisis deux équipes différentes.")
                 else:
-                    lh, la = lambdas_brutes(dom, ext, att, dfn, mh, ma)
+                    lh, la = lambdas_brutes(dom, ext, att, dfn, mh, ma, abs_dom, abs_ext)
                     nouveau = (comp, dom, ext, prevoir(lh, la, corr))
         else:
             nom_a = st.text_input("Équipe 1", key="man_nom_a")
             nom_b = st.text_input("Équipe 2", key="man_nom_b")
             neutre = st.checkbox("Terrain neutre", value=True, key="man_neutre")
+            
             c1, c2 = st.columns(2)
             with c1:
                 att_a = st.number_input("Buts marqués (éq. 1)", 0.0, 6.0, 1.4, 0.1, key="man_att_a")
-                def_a = st.number_input("Buts encaissés (éq. 1)", 0.0, 6.0, 1.0, 0.1, key="man_def_a")
+                def_a = st.number_input("Buts encaissés / Faiblesse (éq. 1)", 0.0, 6.0, 1.0, 0.1, key="man_def_a")
+                abs_a = st.slider("Joueurs clés absents (éq. 1)", 0, 4, 0, key="abs_a_inter")
             with c2:
                 att_b = st.number_input("Buts marqués (éq. 2)", 0.0, 6.0, 1.2, 0.1, key="man_att_b")
-                def_b = st.number_input("Buts encaissés (éq. 2)", 0.0, 6.0, 1.1, 0.1, key="man_def_b")
+                def_b = st.number_input("Buts encaissés / Faiblesse (éq. 2)", 0.0, 6.0, 1.1, 0.1, key="man_def_b")
+                abs_b = st.slider("Joueurs clés absents (éq. 2)", 0, 4, 0, key="abs_b_inter")
+
             if st.button("Calculer le pronostic", key="man_btn_inter"):
                 if not nom_a.strip() or not nom_b.strip():
                     st.warning("Écris le nom des deux équipes.")
                 elif nom_a.strip().lower() == nom_b.strip().lower():
                     st.warning("Écris deux équipes différentes.")
                 else:
-                    lh, la = lambdas_manuelles(att_a, def_a, att_b, def_b, neutre)
+                    lh, la = lambdas_manuelles(att_a, def_a, att_b, def_b, neutre, abs_a, abs_b)
                     nouveau = (comp, nom_a.strip(), nom_b.strip(),
                                prevoir(lh, la, CORR_NEUTRE))
 
@@ -375,14 +390,14 @@ def saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code):
 
 
 def zone_programme(att, dfn, mh, ma, corr):
-    st.subheader("📄 Programme des matchs")
-    st.info("Photographie ou importe le programme (photo ou PDF). "
-            "Tu peux aussi écrire ou coller les matchs, un par ligne : "
-            "Équipe A - Équipe B")
+    st.subheader("📄 Programme des matchs (Photo / PDF / QR)")
+    st.info("Scannez ou importez un programme. Les données sont lues automatiquement.")
 
-    photo = st.camera_input("📷 Photographier le programme", key="prog_photo")
-    fichier = st.file_uploader("📁 Importer une photo ou un PDF",
-                               type=["jpg", "jpeg", "png", "pdf"], key="prog_file")
+    with st.expander("📷 Options de scan / import", expanded=True):
+        photo = st.camera_input("Prendre une photo rapide", key="prog_photo")
+        fichier = st.file_uploader("Importer une photo ou un PDF",
+                                   type=["jpg", "jpeg", "png", "pdf"], key="prog_file")
+    
     source = photo if photo else fichier
 
     texte = ""
@@ -394,11 +409,11 @@ def zone_programme(att, dfn, mh, ma, corr):
                        "Écris ou colle les matchs dans la case ci-dessous.")
         qr, _ = lire_qr_code(octets)
         if qr:
-            st.caption(f"QR code détecté : {qr}")
+            st.success(f"Code QR détecté et décodé : {qr}")
 
-    texte = st.text_area("Matchs (modifiable)", value=texte, height=150,
+    texte = st.text_area("Matchs détectés (modifiable)", value=texte, height=120,
                          key="prog_texte")
-    maxi = st.slider("Nombre maximum de matchs affichés", 5, 100, MAX_AFFICHE, 5)
+    maxi = st.slider("Nombre maximum de matchs affichés", 5, 50, MAX_AFFICHE, 5)
 
     liste = extraire_matchs(texte)
     if not liste:
@@ -417,50 +432,63 @@ def zone_programme(att, dfn, mh, ma, corr):
         else:
             lh, la = lambdas_manuelles(1.4, 1.0, 1.2, 1.1, False)
             carte(f"{i}. {a}", b, prevoir(lh, la, CORR_NEUTRE))
-            st.caption("⚠️ Équipes inconnues dans ce championnat : estimation générique.")
+            st.caption("⚠️ Équipes inconnues : estimation générique.")
     return len(liste)
 
 
 # ---------------------------------------------------------------
-# INTERFACE
+# INTERFACE PRINCIPALE
 # ---------------------------------------------------------------
-st.title("⚽ Pronostics Football")
+st.title("⚽ Pronostics Football Avancés")
 
-pays = st.selectbox("Pays", list(PAYS.keys()))
-divisions = PAYS[pays]
-div_nom = st.selectbox("Division", list(divisions.keys()))
-code = divisions[div_nom]
-nom_champ = f"{pays} - {div_nom}"
+# Menu de sélection des compétitions mondiales et nationales unifié
+choix_type = st.sidebar.radio("Type de compétition", ["Championnats Nationaux", "Compétitions Internationales / FIFA / CAN"])
 
-with st.spinner("Chargement..."):
-    donnees = charger(code)
+if choix_type == "Championnats Nationaux":
+    pays = st.sidebar.selectbox("Pays", list(PAYS.keys()))
+    divisions = PAYS[pays]
+    div_nom = st.sidebar.selectbox("Division", list(divisions.keys()))
+    code = divisions[div_nom]
+    nom_champ = f"{pays} - {div_nom}"
+    
+    with st.spinner("Chargement des statistiques..."):
+        donnees = charger(code)
+else:
+    code = "INTER"
+    nom_champ = st.sidebar.selectbox("Sélectionner", COMPETITIONS_INTER)
+    donnees = pd.DataFrame()
 
-if donnees.empty:
-    st.warning("Données automatiques indisponibles pour ce championnat. "
-               "Les matchs seront calculés avec une estimation générique.")
+if donnees.empty and code != "INTER":
+    st.warning("Données automatiques indisponibles pour ce championnat. Basculement en mode personnalisable.")
     zone_programme(None, None, None, None, CORR_NEUTRE)
     saisie_manuelle(None, None, None, None, CORR_NEUTRE, nom_champ, code)
     st.stop()
 
-att, dfn, mh, ma = forces(donnees)
-rec_log = resultats_journal(code, donnees)
-rec_bt = backtest(donnees)
-morceaux_rec = [x for x in (rec_log, rec_bt) if not x.empty]
-rec = pd.concat(morceaux_rec, ignore_index=True) if morceaux_rec else rec_vide()
-corr = corrections(rec)
+if code != "INTER":
+    att, dfn, mh, ma = forces(donnees)
+    rec_log = resultats_journal(code, donnees)
+    rec_bt = backtest(donnees)
+    morceaux_rec = [x for x in (rec_log, rec_bt) if not x.empty]
+    rec = pd.concat(morceaux_rec, ignore_index=True) if morceaux_rec else rec_vide()
+    corr = corrections(rec)
+else:
+    att, dfn, mh, ma, corr = None, None, None, None, CORR_NEUTRE
 
-onglet1, onglet2 = st.tabs(["Pronostics", "Apprentissage"])
+onglet1, onglet2 = st.tabs(["📊 Programme & Matchs", "⚙️ Apprentissage & Stats"])
 
 with onglet1:
     zone_programme(att, dfn, mh, ma, corr)
     saisie_manuelle(att, dfn, mh, ma, corr, nom_champ, code)
 
 with onglet2:
-    st.subheader("Apprentissage")
-    st.write(f"Matchs utilisés pour corriger le modèle : **{corr['n']}**")
-    if corr["n"] < 30:
-        st.info("Pas assez de matchs : le modèle reste neutre.")
+    st.subheader("Paramètres d'Apprentissage du Modèle")
+    if code != "INTER":
+        st.write(f"Matchs utilisés pour corriger le modèle : **{corr['n']}**")
+        if corr["n"] < 30:
+            st.info("Pas assez de matchs : le modèle reste neutre.")
+        else:
+            st.write(f"Correction domicile : x{corr['kh']:.2f}")
+            st.write(f"Correction extérieur : x{corr['ka']:.2f}")
+            st.write(f"Correction matchs nuls : x{corr['nul']:.2f}")
     else:
-        st.write(f"Correction domicile : x{corr['kh']:.2f}")
-        st.write(f"Correction extérieur : x{corr['ka']:.2f}")
-        st.write(f"Correction matchs nuls : x{corr['nul']:.2f}")
+        st.info("Mode international : Utilisation des paramètres standards pondérés.")
