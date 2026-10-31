@@ -1,3 +1,12 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import requests
+import io
+import os
+import re
+import math
+from datetime import date, datetime
 if st.button("🔍 Analyser le match"):
     if not equipe_dom.strip() or not equipe_ext.strip():
         st.error("Entre les deux noms des équipes.")
