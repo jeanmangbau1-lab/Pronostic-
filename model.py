@@ -3,6 +3,7 @@ import os
 import re
 import difflib
 from datetime import date, datetime
+import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -86,7 +87,153 @@ def nettoyer(d):
     return d.sort_values("Date", kind="stable").reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False)
+# ---------------------------------------------------------------
+# API EN DIRECT (résultats récents + calendrier)
+# ---------------------------------------------------------------
+FD_CODES = {"E0": "PL", "E1": "ELC", "D1": "BL1", "I1": "SA",
+            "SP1": "PD", "F1": "FL1", "P1": "PPL", "N1": "DED"}
+TSDB_IDS = {"E0": 4328, "E1": 4329, "D1": 4331, "I1": 4332, "SP1": 4335,
+            "F1": 4334, "P1": 4344, "N1": 4337, "B1": 4338, "T1": 4339,
+            "SC0": 4330}
+ALIAS = {
+    "manchester united": "Man United", "manchester city": "Man City",
+    "newcastle united": "Newcastle", "nottingham forest": "Nott'm Forest",
+    "wolverhampton wanderers": "Wolves", "tottenham hotspur": "Tottenham",
+    "west ham united": "West Ham", "brighton hove albion": "Brighton",
+    "leeds united": "Leeds", "leicester city": "Leicester",
+    "paris saint germain": "Paris SG", "atletico madrid": "Ath Madrid",
+    "athletic club": "Ath Bilbao", "real betis": "Betis",
+    "real sociedad": "Sociedad", "bayer 04 leverkusen": "Leverkusen",
+    "borussia monchengladbach": "M'gladbach",
+}
+
+
+def _norm_nom(n):
+    n = re.sub(r"[^\w\s']", " ", str(n).lower())
+    n = re.sub(r"\b(fc|cf|afc|ac|as|sc|ssc|rcd|cd|sv|fsv|vfb|vfl|1)\b", " ", n)
+    return re.sub(r"\s+", " ", n).strip()
+
+
+def nom_vers_csv(nom, equipes):
+    n = _norm_nom(nom)
+    a = ALIAS.get(n)
+    if a and a in equipes:
+        return a
+    return trouver_equipe(n, equipes) or trouver_equipe(nom, equipes)
+
+
+def _recents_fd(code):
+    c = FD_CODES.get(code)
+    try:
+        cle = st.secrets["FOOTBALL_DATA_KEY"]
+    except Exception:
+        cle = None
+    if not c or not cle:
+        return []
+    try:
+        r = requests.get(
+            f"https://api.football-data.org/v4/competitions/{c}/matches",
+            params={"status": "FINISHED"},
+            headers={"X-Auth-Token": cle}, timeout=8)
+        r.raise_for_status()
+        out = []
+        for m in r.json().get("matches", []):
+            ft = (m.get("score") or {}).get("fullTime") or {}
+            if ft.get("home") is None or ft.get("away") is None:
+                continue
+            out.append((m["utcDate"][:10], m["homeTeam"]["name"],
+                        m["awayTeam"]["name"], ft["home"], ft["away"]))
+        return out
+    except Exception:
+        return []
+
+
+def _recents_tsdb(code):
+    i = TSDB_IDS.get(code)
+    if not i:
+        return []
+    try:
+        r = requests.get(
+            "https://www.thesportsdb.com/api/v1/json/123/eventspastleague.php",
+            params={"id": i}, timeout=8)
+        r.raise_for_status()
+        out = []
+        for e in (r.json().get("events") or []):
+            if e.get("intHomeScore") is None or e.get("intAwayScore") is None:
+                continue
+            out.append((e["dateEvent"], e["strHomeTeam"], e["strAwayTeam"],
+                        int(e["intHomeScore"]), int(e["intAwayScore"])))
+        return out
+    except Exception:
+        return []
+
+
+def ajouter_recents(d, code):
+    """Ajoute les matchs récents des API. Si tout échoue, renvoie d inchangé."""
+    try:
+        if d.empty:
+            return d
+        equipes = set(d["HomeTeam"]) | set(d["AwayTeam"])
+        limite = d["Date"].max() - pd.Timedelta(days=14)
+        connus = {}
+        for r in d[d["Date"] >= limite].itertuples():
+            connus.setdefault((r.HomeTeam, r.AwayTeam), []).append(r.Date)
+        new = []
+        for dt, h, a, hg, ag in _recents_fd(code) + _recents_tsdb(code):
+            dt = pd.to_datetime(dt, errors="coerce")
+            if pd.isna(dt) or dt < limite:
+                continue
+            h2, a2 = nom_vers_csv(h, equipes), nom_vers_csv(a, equipes)
+            if not h2 or not a2 or h2 == a2:
+                continue
+            if any(abs((dt - x).days) <= 2 for x in connus.get((h2, a2), [])):
+                continue
+            connus.setdefault((h2, a2), []).append(dt)
+            new.append((dt, h2, a2, int(hg), int(ag)))
+        if not new:
+            return d
+        add = pd.DataFrame(new, columns=["Date", "HomeTeam", "AwayTeam",
+                                         "FTHG", "FTAG"])
+        return (pd.concat([d, add], ignore_index=True)
+                .sort_values("Date", kind="stable").reset_index(drop=True))
+    except Exception:
+        return d
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def prochains_tsdb(code):
+    i = TSDB_IDS.get(code)
+    if not i:
+        return []
+    try:
+        r = requests.get(
+            "https://www.thesportsdb.com/api/v1/json/123/eventsnextleague.php",
+            params={"id": i}, timeout=8)
+        r.raise_for_status()
+        return [(e["strHomeTeam"], e["strAwayTeam"], e.get("dateEvent", ""))
+                for e in (r.json().get("events") or [])]
+    except Exception:
+        return []
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def matchs_du_jour_tsdb(code, jour_iso):
+    i = TSDB_IDS.get(code)
+    if not i:
+        return []
+    try:
+        r = requests.get(
+            "https://www.thesportsdb.com/api/v1/json/123/eventsday.php",
+            params={"d": jour_iso, "s": "Soccer"}, timeout=8)
+        r.raise_for_status()
+        return [(e["strHomeTeam"], e["strAwayTeam"], (e.get("strTime") or "")[:5])
+                for e in (r.json().get("events") or [])
+                if str(e.get("idLeague")) == str(i)]
+    except Exception:
+        return []
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
 def charger(code):
     if len(code) == 3 and code.isalpha():
         try:
@@ -108,9 +255,10 @@ def charger(code):
     if not morceaux:
         return pd.DataFrame()
     try:
-        return nettoyer(pd.concat(morceaux, ignore_index=True))
+        d = nettoyer(pd.concat(morceaux, ignore_index=True))
     except Exception:
         return pd.DataFrame()
+    return ajouter_recents(d, code)
 
 
 @st.cache_data(show_spinner=False)
@@ -1130,9 +1278,31 @@ def onglet_manuel():
         if L:
             att, dfn, mh, ma = L
             equipes = sorted(att)
-            dom = st.selectbox("Équipe à domicile", equipes, key=f"man_dom_{code}")
-            ext = st.selectbox("Équipe à l'extérieur", equipes,
-                               index=1 if len(equipes) > 1 else 0, key=f"man_ext_{code}")
+            idx_d, idx_e = 0, (1 if len(equipes) > 1 else 0)
+            jour = st.date_input("📆 Calendrier des matchs", value=date.today(),
+                                 key=f"man_jour_{code}")
+            du_jour = matchs_du_jour_tsdb(code, jour.isoformat())
+            ch = 0
+            if du_jour:
+                labels = ["— choisir un match —"] + [
+                    f"{t} · {a} vs {b}" for a, b, t in du_jour]
+                ch = labels.index(st.selectbox(
+                    f"Matchs du {jour:%d/%m/%Y}", labels,
+                    key=f"man_next_{code}_{jour}"))
+                if ch:
+                    x = nom_vers_csv(du_jour[ch - 1][0], equipes)
+                    y = nom_vers_csv(du_jour[ch - 1][1], equipes)
+                    if x:
+                        idx_d = equipes.index(x)
+                    if y:
+                        idx_e = equipes.index(y)
+            else:
+                st.caption("Aucun match trouvé ce jour-là (ou API indisponible) : "
+                           "choisis les équipes à la main.")
+            dom = st.selectbox("Équipe à domicile", equipes, index=idx_d,
+                               key=f"man_dom_{code}_{jour}_{ch}")
+            ext = st.selectbox("Équipe à l'extérieur", equipes, index=idx_e,
+                               key=f"man_ext_{code}_{ch}_{jour}")
             cotes = saisir_cotes("champ")
             if st.button("Calculer le pronostic", key="man_btn_champ"):
                 if dom == ext:
