@@ -52,7 +52,7 @@ COMPETITIONS_INTER = [
     "Autre compétition",
 ]
 
-LOG = "predictions_log.csv"
+COLS_JOURNAL = ["code", "Date", "HomeTeam", "AwayTeam", "lh", "la"]
 KS = np.arange(10)
 FACT = np.array([factorial(k) for k in range(10)], dtype=float)
 SOMME = KS[:, None] + KS[None, :]
@@ -212,11 +212,32 @@ def backtest(d, n_max=300):
     return pd.DataFrame(lignes, columns=COLS_REC)
 
 
-def resultats_journal(code, d):
-    if not os.path.exists(LOG):
+def journal_df():
+    j = st.session_state.get("journal")
+    return j.copy() if j is not None else pd.DataFrame(columns=COLS_JOURNAL)
+
+
+def journal_csv():
+    return journal_df().to_csv(index=False)
+
+
+def ajouter_journal(lignes):
+    """Ajoute des pronostics (code, Date, HomeTeam, AwayTeam, lh, la) au journal de la session."""
+    if not lignes:
+        return 0
+    avant = len(journal_df())
+    j = pd.concat([journal_df(), pd.DataFrame(lignes, columns=COLS_JOURNAL)], ignore_index=True)
+    j = j.drop_duplicates(subset=["code", "Date", "HomeTeam", "AwayTeam"], keep="last")
+    st.session_state["journal"] = j.reset_index(drop=True)
+    return len(j) - avant
+
+
+def resultats_journal(code, d, journal_txt=""):
+    """Pronostics du journal dont le résultat est maintenant connu dans les données."""
+    if not journal_txt:
         return rec_vide()
     try:
-        j = pd.read_csv(LOG)
+        j = pd.read_csv(io.StringIO(journal_txt))
         j = j[j["code"] == code].copy()
         if j.empty:
             return rec_vide()
@@ -230,6 +251,20 @@ def resultats_journal(code, d):
         return m[COLS_REC]
     except Exception:
         return rec_vide()
+
+
+def evaluer_journal(rec):
+    """Qualité des pronostics du journal : favori correct et score de Brier (0 = parfait)."""
+    if rec is None or rec.empty:
+        return None
+    brier, ok = [], 0
+    for r in rec.itertuples():
+        p = np.array(issues(matrice(r.lh, r.la)))
+        o = np.zeros(3)
+        o[0 if r.hg > r.ag else (1 if r.hg == r.ag else 2)] = 1
+        brier.append(float(((p - o) ** 2).sum()))
+        ok += int(np.argmax(p) == np.argmax(o))
+    return {"n": len(rec), "favori": ok / len(rec), "brier": float(np.mean(brier))}
 
 
 def corrections(rec):
@@ -278,8 +313,6 @@ def carte(titre, ext, prev):
 # ---------------------------------------------------------------
 # OUTILS : OCR, QR, noms d'équipes
 # ---------------------------------------------------------------
-PROG_CACHE = "programme_cache.csv"
-TICKETS = "tickets_log.csv"
 COLS_PROG = ["cat", "date", "hora", "id", "home", "away", "o1", "ox", "o2", "source"]
 
 # Codes de catégories du programme Elephant Bet -> championnats avec données
@@ -308,6 +341,7 @@ RE_COTE = re.compile(r"=>\s*@?\s*(\d+[.,]\s?\d+)")
 RE_ID = re.compile(r"\[\s*(\d{2,5})\s*\]")
 
 
+@st.cache_resource(show_spinner=False)
 def outils_dispo():
     ok = {}
     ok["pdf"] = False
@@ -427,16 +461,6 @@ def ocr_image(octets, cote_final=3000, angles=(-10, 0, 10)):
             angle = angles[0]
         return pytesseract.image_to_string(pivote(echelle(img, cote_final), angle),
                                            config="--psm 6")
-    except Exception:
-        return ""
-
-
-@st.cache_data(show_spinner=False)
-def extraire_texte_pdf(octets):
-    try:
-        import pdfplumber
-        with pdfplumber.open(io.BytesIO(octets)) as pdf:
-            return "\n".join((p.extract_text() or "") for p in pdf.pages)
     except Exception:
         return ""
 
@@ -652,13 +676,17 @@ def ligue(code):
 
 
 @st.cache_data(show_spinner=False)
-def corr_pour(code):
+def corr_pour(code, journal_txt=""):
     d = charger(code)
     if d.empty:
         return dict(CORR_NEUTRE)
-    parts = [x for x in (resultats_journal(code, d), backtest(d)) if not x.empty]
+    parts = [x for x in (resultats_journal(code, d, journal_txt), backtest(d)) if not x.empty]
     rec = pd.concat(parts, ignore_index=True) if parts else rec_vide()
     return corrections(rec)
+
+
+def corr_code(code):
+    return corr_pour(code, journal_csv())
 
 
 def analyse_match(home, away, cat):
@@ -679,7 +707,8 @@ def analyse_match_code(home, away, code):
     if not x or not y or x == y:
         return None
     lh, la = lambdas_brutes(x, y, att, dfn, mh, ma)
-    return {"dom": x, "ext": y, "code": code, "prev": prevoir(lh, la, corr_pour(code))}
+    return {"dom": x, "ext": y, "code": code, "lh": float(lh), "la": float(la),
+            "prev": prevoir(lh, la, corr_code(code))}
 
 
 def cotes_valides(o1, ox, o2):
@@ -909,24 +938,37 @@ COLS_TK = ["code", "enregistre_le", "mise", "cote_totale", "nb_matchs",
 
 
 def charger_tickets():
-    if not os.path.exists(TICKETS):
-        return pd.DataFrame(columns=COLS_TK)
-    try:
-        df = pd.read_csv(TICKETS)
-        for c in COLS_TK:
-            if c not in df.columns:
-                df[c] = ""
-        return df[COLS_TK]
-    except Exception:
-        return pd.DataFrame(columns=COLS_TK)
+    df = st.session_state.get("tickets")
+    return df.copy() if df is not None else pd.DataFrame(columns=COLS_TK)
 
 
 def sauver_tickets(df):
+    st.session_state["tickets"] = df.reset_index(drop=True)
+    return True
+
+
+def importer_csv(cle, colonnes, cle_dedoublon, etat, libelle):
+    """Importe un CSV de sauvegarde et le fusionne avec les données de la session."""
+    f = st.file_uploader(libelle, type=["csv"], key=cle)
+    if f is None:
+        return
+    sig = f"{f.name}{f.size}"
+    if st.session_state.get(cle + "_fait") == sig:
+        return
     try:
-        df.to_csv(TICKETS, index=False)
-        return True
+        nouveau = pd.read_csv(io.BytesIO(f.getvalue()))
+        for c in colonnes:
+            if c not in nouveau.columns:
+                nouveau[c] = ""
+        actuel = st.session_state.get(etat)
+        base = actuel if actuel is not None else pd.DataFrame(columns=colonnes)
+        fusion = pd.concat([base, nouveau[colonnes]], ignore_index=True)
+        fusion = fusion.drop_duplicates(subset=cle_dedoublon, keep="first")
+        st.session_state[etat] = fusion.reset_index(drop=True)
+        st.session_state[cle + "_fait"] = sig
+        st.success(f"{len(fusion) - len(base)} ligne(s) importée(s).")
     except Exception:
-        return False
+        st.error("Fichier illisible : choisis un CSV téléchargé depuis l'application.")
 
 
 def miniatures(fichiers):
@@ -1038,20 +1080,12 @@ def construire_programme():
     if morceaux:
         prog = pd.concat(morceaux, ignore_index=True).drop_duplicates(
             subset=["id", "home", "date"])
-        try:
-            prog.to_csv(PROG_CACHE, index=False)
-        except Exception:
-            pass
+        st.session_state["prog"] = prog
         return prog
-    if os.path.exists(PROG_CACHE):
-        try:
-            prog = pd.read_csv(PROG_CACHE, dtype={"id": str})
-            prog["date"] = pd.to_datetime(prog["date"], errors="coerce").dt.date
-            prog["cat"] = prog["cat"].fillna("")
-            st.caption("Dernier programme importé (gardé en mémoire).")
-            return prog.dropna(subset=["date"])
-        except Exception:
-            pass
+    prog = st.session_state.get("prog")
+    if prog is not None and not prog.empty:
+        st.caption("Programme gardé pendant cette session.")
+        return prog
     return prog_vide()
 
 
@@ -1106,6 +1140,13 @@ def onglet_programme(prog):
             an = analyse_match(r["home"], r["away"], r["cat"])
             carte_programme(n, r, an)
             liste.append((r, an))
+    avec = [(r, an) for r, an in liste if an]
+    if avec and st.button(f"📒 Enregistrer les {len(avec)} pronostics avec statistiques "
+                          "(pour l'apprentissage)", key="prog_journal"):
+        n = ajouter_journal([[an["code"], f"{r['date']:%Y-%m-%d}", an["dom"], an["ext"],
+                              an["lh"], an["la"]] for r, an in avec])
+        st.success(f"{n} pronostic(s) ajouté(s) au journal. Quand les matchs seront joués "
+                   "et que les données seront à jour, le modèle apprendra de ses erreurs.")
     return liste
 
 
@@ -1278,10 +1319,16 @@ def onglet_ticket(prog):
 
 def historique():
     st.subheader("🗂️ Historique de mes tickets")
+    st.caption("Ton historique reste dans cette session et n'est vu par personne d'autre. "
+               "Télécharge-le pour le garder : il disparaît si tu fermes l'application.")
+    importer_csv("tk_imp", COLS_TK, ["code", "enregistre_le", "mise", "cote_totale", "matchs"],
+                 "tickets", "⬆️ Importer un historique (CSV)")
     df = charger_tickets()
     if df.empty:
         st.caption("Aucun ticket enregistré pour le moment.")
         return
+    st.download_button("⬇️ Télécharger l'historique (CSV)", df.to_csv(index=False).encode("utf-8"),
+                       file_name="historique_tickets.csv", mime="text/csv", key="tk_dl")
     edite = st.data_editor(
         df, key="tk_hist", use_container_width=True, hide_index=True,
         disabled=[c for c in COLS_TK if c != "statut"],
@@ -1389,12 +1436,16 @@ def onglet_manuel():
             ext = st.selectbox("Équipe à l'extérieur", equipes,
                                index=1 if len(equipes) > 1 else 0, key=f"man_ext_{code}")
             cotes = saisir_cotes("champ")
+            jour_m = st.date_input("Date du match (pour l'apprentissage)", value=date.today(),
+                                   key="man_date")
             if st.button("Calculer le pronostic", key="man_btn_champ"):
                 if dom == ext:
                     st.warning("Choisis deux équipes différentes.")
                 else:
                     lh, la = lambdas_brutes(dom, ext, att, dfn, mh, ma)
-                    nouveau = (comp, dom, ext, prevoir(lh, la, corr_pour(code)), cotes)
+                    nouveau = (comp, dom, ext, prevoir(lh, la, corr_code(code)), cotes)
+                    if st.session_state.get("man_journal", True):
+                        ajouter_journal([[code, jour_m.isoformat(), dom, ext, float(lh), float(la)]])
         else:
             st.warning("Données indisponibles pour ce championnat. "
                        "Utilise une compétition internationale (saisie libre).")
@@ -1502,7 +1553,7 @@ def onglet_apprentissage():
         st.info("Choisis un championnat dans l'onglet « Manuel » pour voir "
                 "les corrections du modèle.")
         return
-    corr = corr_pour(code)
+    corr = corr_code(code)
     st.write(f"Matchs utilisés pour corriger le modèle : **{corr['n']}**")
     if corr["n"] < 30:
         st.info("Pas assez de matchs : le modèle reste neutre.")
@@ -1510,6 +1561,27 @@ def onglet_apprentissage():
         st.write(f"Correction domicile : x{corr['kh']:.2f}")
         st.write(f"Correction extérieur : x{corr['ka']:.2f}")
         st.write(f"Correction matchs nuls : x{corr['nul']:.2f}")
+    st.markdown("**📒 Tes pronostics enregistrés**")
+    j = journal_df()
+    d = charger(code)
+    rec = resultats_journal(code, d, journal_csv()) if not d.empty else rec_vide()
+    st.write(f"Dans ce championnat : **{int((j['code'] == code).sum())}** enregistrés, "
+             f"**{len(rec)}** avec un résultat connu.")
+    ev = evaluer_journal(rec)
+    if ev:
+        a, b = st.columns(2)
+        a.metric("Favori correct", f"{ev['favori'] * 100:.0f}%")
+        b.metric("Score de Brier", f"{ev['brier']:.3f}")
+        st.caption("Score de Brier : 0 = parfait ; 0,667 = autant vaut répondre 1/3-1/3-1/3. "
+                   "Fie-toi à ces chiffres seulement avec 100 matchs ou plus.")
+    else:
+        st.caption("Enregistre des pronostics (onglets Programme ou Manuel) : une fois les "
+                   "matchs joués, tu verras ici si le modèle a eu raison.")
+    if len(j):
+        st.download_button("⬇️ Télécharger mon journal (CSV)", j.to_csv(index=False).encode("utf-8"),
+                           file_name="journal_pronostics.csv", mime="text/csv", key="jr_dl")
+    importer_csv("jr_imp", COLS_JOURNAL, ["code", "Date", "HomeTeam", "AwayTeam"],
+                 "journal", "⬆️ Importer un journal (CSV)")
 
 
 # ---------------------------------------------------------------
@@ -1940,7 +2012,29 @@ def bloc_combinaisons(P, sel, marches, home, away):
 # ---------------------------------------------------------------
 # INTERFACE
 # ---------------------------------------------------------------
+def empecher_traduction():
+    """Évite que Chrome traduise la page (la traduction casse l'affichage de Streamlit)."""
+    try:
+        import streamlit.components.v1 as components
+        components.html("""<script>
+        try {
+          const d = window.parent.document;
+          d.documentElement.setAttribute('lang', 'fr');
+          d.documentElement.setAttribute('translate', 'no');
+          d.documentElement.classList.add('notranslate');
+          if (!d.querySelector('meta[name=google]')) {
+            const m = d.createElement('meta');
+            m.name = 'google'; m.content = 'notranslate';
+            d.head.appendChild(m);
+          }
+        } catch (e) {}
+        </script>""", height=0)
+    except Exception:
+        pass
+
+
 st.title("⚽ Pronostics Football")
+empecher_traduction()
 
 OUTILS = outils_dispo()
 with st.expander("🔧 Diagnostic de la lecture automatique",
