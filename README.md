@@ -87,7 +87,7 @@ def nettoyer(d):
     return d.sort_values("Date", kind="stable").reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=21600)
 def charger(code):
     if len(code) == 3 and code.isalpha():
         try:
