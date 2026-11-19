@@ -1,4 +1,7 @@
-streamlit_app.py
+streamlit
+pandas
+numpy
+pypdf
 import os
 import re
 import difflib
