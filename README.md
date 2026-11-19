@@ -1,10 +1,17 @@
-
 import os
+import re
+import difflib
+import unicodedata
 import streamlit as st
 import pandas as pd
 import numpy as np
 from math import factorial
 from datetime import date, timedelta
+
+try:
+    from pypdf import PdfReader
+except ImportError:          # pypdf manquant : l'app démarre quand même
+    PdfReader = None
 
 st.set_page_config(page_title="Pronostics Football", layout="centered")
 
@@ -307,6 +314,72 @@ def enregistrer(lignes):
         pass
 
 
+# ---------- LECTURE PDF / TEXTE ----------
+SEP = re.compile(r"\s+(?:vs\.?|v|contre|x|[-–—])\s+", re.I)
+HEURE = re.compile(r"\b([01]?\d|2[0-3])\s*[:hH]\s*([0-5]\d)\b")
+COTE = re.compile(r"\b\d{1,3}[.,]\d{1,2}\b")
+DATE_TXT = re.compile(r"\b\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?\b")
+MOTS_INUTILES = {"fc", "cf", "afc", "sc", "ac", "as", "cd", "club", "de"}
+
+
+def lire_pdf(fichier):
+    lecteur = PdfReader(fichier)
+    return "\n".join((page.extract_text() or "") for page in lecteur.pages)
+
+
+def extraire_matchs(texte):
+    """Trouve les lignes du type « Equipe A - Equipe B » (heure et cotes ignorées)."""
+    vus, resultat = set(), []
+    for ligne in texte.splitlines():
+        l = ligne.strip()
+        if not l:
+            continue
+        h = HEURE.search(l)
+        heure = f"{int(h.group(1)):02d}:{h.group(2)}" if h else ""
+        l = HEURE.sub(" ", l)
+        l = DATE_TXT.sub(" ", l)
+        l = COTE.sub(" ", l)
+        l = re.sub(r"^\s*\d+\s*[.)]\s+", "", l)       # numéro de ligne « 1. »
+        parts = SEP.split(l.strip())
+        if len(parts) < 2:
+            continue
+        noms = [re.sub(r"[^\w\s'.&-]", " ", p_).strip(" -–—.") for p_ in parts[:2]]
+        noms = [re.sub(r"\s+", " ", n_) for n_ in noms]
+        if any(len(n_) < 2 or len(n_) > 40 or not re.search(r"[^\W\d_]", n_)
+               for n_ in noms):
+            continue
+        cle = (noms[0].lower(), noms[1].lower())
+        if cle in vus:
+            continue
+        vus.add(cle)
+        resultat.append((noms[0], noms[1], heure))
+    return resultat
+
+
+def normaliser(nom):
+    n = unicodedata.normalize("NFKD", nom).encode("ascii", "ignore").decode().lower()
+    mots = [m for m in re.sub(r"[^a-z0-9]+", " ", n).split() if m not in MOTS_INUTILES]
+    return " ".join(mots)
+
+
+def trouver_equipe(nom, equipes):
+    """Retrouve le nom officiel d'une équipe (tolère fautes et abréviations)."""
+    table = {normaliser(e): e for e in equipes}
+    n = normaliser(nom)
+    if not n:
+        return None
+    if n in table:
+        return table[n]
+    proches = difflib.get_close_matches(n, list(table), n=1, cutoff=0.8)
+    if proches:
+        return table[proches[0]]
+    for k, e in table.items():
+        if min(len(n), len(k)) >= 5 and (n in k or k in n):
+            return e
+    proches = difflib.get_close_matches(n, list(table), n=1, cutoff=0.6)
+    return table[proches[0]] if proches else None
+
+
 # ---------- AFFICHAGE ----------
 def carte(dom, ext, prev):
     pm = prev["pm"]
@@ -363,7 +436,7 @@ cal = cal[(cal["code"] == code)
 if choix != "Toute la semaine":
     cal = cal[cal["Date"].dt.weekday == JOURS.index(choix)]
 
-onglet1, onglet2 = st.tabs(["Pronostics", "Apprentissage"])
+onglet1, onglet2, onglet3 = st.tabs(["Pronostics", "Apprentissage", "PDF / Texte"])
 
 with onglet1:
     st.subheader("Programme des matchs")
@@ -445,3 +518,6 @@ with onglet2:
         st.caption("Attention : un pari très probable (+1,5 buts, double chance) "
                    "gagne souvent mais rapporte peu. Pour les cotes, regarde "
                    "toujours le rapport entre probabilité et cote.")
+
+with onglet3:
+    st.subheader("Lire un PDF ou un tex
